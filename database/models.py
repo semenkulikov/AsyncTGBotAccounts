@@ -1,5 +1,8 @@
-from sqlalchemy import Column, Integer, String, Boolean, Text
-from sqlalchemy.orm import declarative_base
+from sqlalchemy import Column, Integer, String, LargeBinary, DateTime, Boolean, Text
+from sqlalchemy.ext.asyncio import AsyncAttrs, create_async_engine, AsyncSession
+from sqlalchemy.orm import declarative_base, sessionmaker
+
+from config_data.config import DATABASE_URL
 
 Base = declarative_base()
 
@@ -25,3 +28,16 @@ class Group(Base):
     invite_link = Column(String, nullable=True)
     location = Column(String, nullable=True)
     username = Column(String, nullable=True)
+
+
+class Account(AsyncAttrs, Base):
+    __tablename__ = 'accounts'
+
+    id = Column(Integer, primary_key=True)
+    phone = Column(String(20), unique=True)
+    session_data = Column(LargeBinary)
+    last_active = Column(DateTime)
+    two_factor = Column(String(50), nullable=True)
+
+engine = create_async_engine(DATABASE_URL)
+async_session = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)

@@ -1,6 +1,7 @@
 from sqlalchemy.future import select
 from database.models import User, Group
-from database.engine import async_session
+from database.models import async_session
+
 
 async def get_user_by_user_id(user_id: str):
     async with async_session() as session:
