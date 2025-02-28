@@ -1,5 +1,6 @@
-aiogram
-SQLAlchemy
+aiogram>=3.0
 python-dotenv
-asyncpg
+telethon
+cryptography
+sqlalchemy
 aiosqlite
