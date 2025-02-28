@@ -6,9 +6,8 @@ from loader import dp, bot, app_logger
 from config_data.config import ALLOWED_USERS, ADMIN_ID
 from keyboards.inline.accounts import users_markup
 from states.states import AdminPanel
-from database.engine import async_session
 from sqlalchemy.future import select
-from database.models import User
+from database.models import User, async_session
 
 
 @dp.message(Command('admin_panel'))
