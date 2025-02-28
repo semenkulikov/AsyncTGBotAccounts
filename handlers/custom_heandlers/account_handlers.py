@@ -6,9 +6,9 @@ from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
 
 from config_data.config import ENCRYPTION_KEY, API_ID, API_HASH
-from loader import dp
+from loader import dp, app_logger, activity_manager
 from services.account_manager import AccountService
-from states.states import AddAccountStates
+from states.states import AddAccountStates, AccountStates
 
 
 @dp.message(Command("add_account"))
@@ -51,7 +51,9 @@ async def process_code(message: Message, state: FSMContext):
 
     session_str = client.session.save()
     service = AccountService(ENCRYPTION_KEY)
-    await service.create_account(data['phone'], session_str)
+    await activity_manager.start_user_activity(message.from_user.id, service)
+    app_logger.info("Запущена фоновая задача для входа в аккаунты")
+    await service.create_account(message.from_user.id, data['phone'], session_str)
     await message.answer("Аккаунт успешно добавлен!")
     await client.disconnect()
     await state.clear()
@@ -66,10 +68,44 @@ async def process_2fa(message: Message, state: FSMContext):
         await data['client'].sign_in(password=password)
         session_str = data['client'].session.save()
         service = AccountService(ENCRYPTION_KEY)
-        await service.create_account(data['phone'], session_str)
+        await service.create_account(message.from_user.id, data['phone'], session_str)
+        await activity_manager.start_user_activity(message.from_user.id, service)
         await message.answer("Аккаунт успешно добавлен!")
     except Exception as e:
         await message.answer(f"Ошибка: {str(e)}. Начните заново.")
 
     await data['client'].disconnect()
+    await state.clear()
+
+
+@dp.message(Command("my_accounts"))
+async def list_accounts(message: Message):
+    service = AccountService(ENCRYPTION_KEY)
+    accounts = await service.get_user_accounts(message.from_user.id)
+
+    if not accounts:
+        return await message.answer("У вас нет привязанных аккаунтов")
+
+    text = "Ваши аккаунты:\n" + "\n".join(
+        [f"{i + 1}. {acc.phone} ({'активен' if acc.is_active else 'неактивен'})"
+         for i, acc in enumerate(accounts)]
+    )
+    await message.answer(text)
+
+
+@dp.message(Command("toggle_account"))
+async def toggle_account_start(message: Message, state: FSMContext):
+    await message.answer("Введите номер аккаунта для включения/выключения:")
+    await state.set_state(AccountStates.wait_toggle_phone)
+
+
+@dp.message(AccountStates.wait_toggle_phone)
+async def process_toggle(message: Message, state: FSMContext):
+    service = AccountService(ENCRYPTION_KEY)
+    success = await service.toggle_account(message.from_user.id, message.text)
+
+    if success:
+        await message.answer("Статус аккаунта изменен")
+    else:
+        await message.answer("Аккаунт не найден")
     await state.clear()

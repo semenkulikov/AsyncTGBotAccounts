@@ -10,7 +10,9 @@ else:
 DEFAULT_COMMANDS = (
     ('start', "Запустить бота"),
     ('help', "Вывести справку"),
-    ("add_account", "Добавить аккаунт")
+    ("add_account", "Добавить аккаунт"),
+    ('my_accounts', "Мои аккаунты"),
+    ('toggle_account', "Изменить статус аккаунты (Вкл\Выкл)")
 )
 ADMIN_COMMANDS = (
     ("admin_panel", "Админка"),

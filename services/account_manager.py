@@ -1,13 +1,13 @@
-from sqlalchemy import select
-from telethon import TelegramClient
-from telethon.sessions import StringSession
+from typing import Dict, List
+from sqlalchemy import select, and_
 from cryptography.fernet import Fernet
 import asyncio
 import random
 from datetime import datetime
-
-from config_data.config import CHECK_INTERVAL_MIN, CHECK_INTERVAL_MAX
-from database.models import Account, async_session
+from telethon import TelegramClient
+from telethon.sessions import StringSession
+from config_data.config import CHECK_INTERVAL_MIN, CHECK_INTERVAL_MAX, API_ID, API_HASH
+from database.models import Account, User, async_session
 
 
 class AccountService:
@@ -20,67 +20,143 @@ class AccountService:
     async def decrypt_session(self, encrypted_data: bytes) -> str:
         return self.cipher.decrypt(encrypted_data).decode()
 
-    async def create_account(self, phone: str, session_str: str):
+    # async def create_user_if_not_exists(self, user_id: int, full_name: str, username: str):
+    #     async with async_session() as session:
+    #         user = await session.get(User, user_id)
+    #         if not user:
+    #             user = User(
+    #                 user_id=str(user_id),
+    #                 full_name=full_name,
+    #                 username=username,
+    #                 is_premium=False
+    #             )
+    #             session.add(user)
+    #             await session.commit()
+
+    async def create_account(self, user_id: int, phone: str, session_str: str):
         async with async_session() as session:
             encrypted = await self.encrypt_session(session_str)
-            account = Account(phone=phone, session_data=encrypted)
+            account = Account(
+                user_id=user_id,
+                phone=phone,
+                session_data=encrypted,
+                is_active=True
+            )
             session.add(account)
             await session.commit()
             return account
 
-    async def get_all_accounts(self):
+    async def get_user_accounts(self, user_id: int) -> List[Account]:
         async with async_session() as session:
-            result = await session.execute(select(Account))
+            result = await session.execute(
+                select(Account).where(
+                    and_(
+                        Account.user_id == user_id,
+                        Account.is_active == True
+                    )
+                )
+            )
             return result.scalars().all()
 
-    async def delete_account(self, phone: str):
+    async def toggle_account(self, user_id: int, phone: str) -> bool:
         async with async_session() as session:
-            account = await session.get(Account, phone)
+            account = await session.execute(
+                select(Account).where(
+                    and_(
+                        Account.user_id == user_id,
+                        Account.phone == phone
+                    )
+                )
+            )
+            account = account.scalar()
             if account:
-                await session.delete(account)
+                account.is_active = not account.is_active
                 await session.commit()
                 return True
             return False
 
     async def update_last_active(self, phone: str):
         async with async_session() as session:
-            account = await session.get(Account, phone)
+            account = await session.execute(
+                select(Account).where(Account.phone == phone)
+            )
+            account = account.scalar()
             if account:
                 account.last_active = datetime.now()
                 await session.commit()
-                return True
-            return False
+
+    async def get_all_active_accounts(self) -> List[Account]:
+        async with async_session() as session:
+            result = await session.execute(
+                select(Account).where(Account.is_active == True)
+            )
+            return result.scalars().all()
 
 
-class AccountActivity:
-    def __init__(self, api_id: int, api_hash: str, account_service: AccountService):
-        self.api_id = api_id
-        self.api_hash = api_hash
-        self.account_service = account_service
+class UserActivityManager:
+    def __init__(self):
+        self.user_tasks: Dict[int, asyncio.Task] = {}
+        self.account_tasks: Dict[str, asyncio.Task] = {}
+        self.lock = asyncio.Lock()
 
-    async def _connect_client(self, session_str: str):
-        client = TelegramClient(StringSession(session_str), self.api_id, self.api_hash)
-        await client.connect()
-        return client
+    async def start_user_activity(self, user_id: int, service: AccountService):
+        async with self.lock:
+            if user_id not in self.user_tasks:
+                self.user_tasks[user_id] = asyncio.create_task(
+                    self._user_monitor_loop(user_id, service)
+                )
 
-    async def perform_activity(self, account):
+    async def stop_user_activity(self, user_id: int):
+        async with self.lock:
+            task = self.user_tasks.get(user_id)
+            if task:
+                task.cancel()
+                del self.user_tasks[user_id]
+
+    async def _user_monitor_loop(self, user_id: int, service: AccountService):
+        while True:
+            try:
+                accounts = await service.get_user_accounts(user_id)
+                await self._manage_account_tasks(accounts, service)
+                await asyncio.sleep(60)  # Check every minute for new accounts
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                await asyncio.sleep(60)
+
+    async def _manage_account_tasks(self, accounts: List[Account], service: AccountService):
+        current_phones = {acc.phone for acc in accounts}
+        existing_phones = set(self.account_tasks.keys())
+
+        # Start new tasks
+        for phone in current_phones - existing_phones:
+            account = next(acc for acc in accounts if acc.phone == phone)
+            self.account_tasks[phone] = asyncio.create_task(
+                self._account_activity_loop(account, service)
+            )
+
+        # Stop removed tasks
+        for phone in existing_phones - current_phones:
+            self.account_tasks[phone].cancel()
+            del self.account_tasks[phone]
+
+    async def _account_activity_loop(self, account: Account, service: AccountService):
+        while True:
+            try:
+                await self._perform_activity(account, service)
+                interval = random.randint(CHECK_INTERVAL_MIN, CHECK_INTERVAL_MAX)
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                await asyncio.sleep(60)
+
+    async def _perform_activity(self, account: Account, service: AccountService):
         try:
-            session_str = await self.account_service.decrypt_session(account.session_data)
-            async with await self._connect_client(session_str) as client:
+            session_str = await service.decrypt_session(account.session_data)
+            async with TelegramClient(StringSession(session_str), API_ID, API_HASH) as client:
                 if await client.is_user_authorized():
                     await client.get_me()
-                    await self.account_service.update_last_active(account.phone)
-                    return True
-            return False
+                    await service.update_last_active(account.phone)
         except Exception as e:
-            print(f"Error for {account.phone}: {str(e)}")
-            return False
-
-    async def random_activity_loop(self):
-        while True:
-            accounts = await self.account_service.get_all_accounts()
-            if accounts:
-                account = random.choice(accounts)
-                await self.perform_activity(account)
-            interval = random.randint(CHECK_INTERVAL_MIN, CHECK_INTERVAL_MAX)
-            await asyncio.sleep(interval)
+            raise

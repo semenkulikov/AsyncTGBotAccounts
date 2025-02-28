@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, LargeBinary, DateTime, Boolean, Text
+from sqlalchemy import Column, Integer, String, LargeBinary, DateTime, Boolean, Text, ForeignKey
 from sqlalchemy.ext.asyncio import AsyncAttrs, create_async_engine, AsyncSession
 from sqlalchemy.orm import declarative_base, sessionmaker
 
@@ -34,10 +34,12 @@ class Account(AsyncAttrs, Base):
     __tablename__ = 'accounts'
 
     id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'))  # Связь с пользователем
     phone = Column(String(20), unique=True)
     session_data = Column(LargeBinary)
     last_active = Column(DateTime)
     two_factor = Column(String(50), nullable=True)
+    is_active = Column(Boolean, default=True)  # Для включения/выключения аккаунта
 
 engine = create_async_engine(DATABASE_URL)
 async_session = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
