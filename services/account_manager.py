@@ -11,23 +11,26 @@ from database.models import Account, User, async_session
 from telethon.tl.types import User as TelegramUser
 from telethon.network import ConnectionTcpAbridged
 
+from database.query_orm import get_user_by_user_id
 from loader import app_logger
+import traceback
 
 
 class AccountService:
     def __init__(self, encryption_key: str):
         self.cipher = Fernet(encryption_key.encode())
+        self.active_sessions: Dict[str, TelegramClient] = {}
 
     async def encrypt_session(self, session_str: str) -> bytes:
-        app_logger.debug("Сессия расшифрована")
+        app_logger.debug(f"Шифрование сессии длиной {len(session_str)} символов")
         return self.cipher.encrypt(session_str.encode())
 
     async def decrypt_session(self, encrypted_data: bytes) -> str:
-        app_logger.debug("Сессия зашифрована")
+        app_logger.debug(f"Дешифрование данных сессии размером {len(encrypted_data)} байт")
         return self.cipher.decrypt(encrypted_data).decode()
 
     async def _create_client(self, session_str: str) -> TelegramClient:
-        app_logger.debug("Создается клиент Telegram")
+        app_logger.debug(f"Создание клиента для сессии: {session_str[:15]}...")
         return TelegramClient(
             session=StringSession(session_str),
             api_id=API_ID,
@@ -38,101 +41,125 @@ class AccountService:
             system_version="Android 14",
             lang_code="en",
             system_lang_code="en-US",
-            timeout=20,
-            auto_reconnect=True
+            timeout=30,
+            auto_reconnect=False
         )
 
     async def validate_session(self, session_str: str) -> bool:
-        app_logger.debug("Проверяется сессия Telegram")
+        """Проверка и кэширование активной сессии"""
+        app_logger.info(f"Проверка сессии: {session_str[:10]}...")
+
+        if session_str in self.active_sessions:
+            app_logger.debug("Использование кэшированной сессии")
+            return True
+
         client = None
         try:
-            client = TelegramClient(
-                StringSession(session_str),
-                API_ID,
-                API_HASH,
-                device_model="Xiaomi Redmi Note 12",
-                app_version="10.5.2",
-                system_version="Android 13"
-            )
-
+            client = await self._create_client(session_str)
             await client.connect()
 
             if not await client.is_user_authorized():
+                app_logger.warning("Сессия не авторизована")
                 return False
 
-            # Дополнительная проверка через получение информации об аккаунте
             me = await client.get_me()
-            return me is not None and hasattr(me, 'phone')
+            if not me or not hasattr(me, 'phone'):
+                app_logger.error("Получен невалидный объект пользователя")
+                return False
+
+            self.active_sessions[session_str] = client
+            app_logger.info(f"Успешная проверка сессии для {me.phone}")
+            return True
 
         except Exception as e:
-            app_logger.error(f"Ошибка валидации сессии: {str(e)}")
+            app_logger.error(f"Ошибка проверки сессии: {str(e)}")
+            app_logger.debug(f"Трассировка ошибки:\n{traceback.format_exc()}")
             return False
         finally:
-            if client:
+            if client and session_str not in self.active_sessions:
                 await client.disconnect()
 
     async def create_account(self, user_id: int, phone: str, session_str: str):
-        app_logger.debug("Создаётся аккаунт Telegram")
+        user = await get_user_by_user_id(user_id)
+        app_logger.info(f"Создание аккаунта для пользователя {user.full_name}, телефон: {phone}")
         async with async_session() as session:
-            encrypted = await self.encrypt_session(session_str)
-            account = Account(
-                user_id=user_id,
-                phone=phone,
-                session_data=encrypted,
-                is_active=True
-            )
-            session.add(account)
-            await session.commit()
-            return account
+            try:
+                encrypted = await self.encrypt_session(session_str)
+                account = Account(
+                    user_id=user_id,
+                    phone=phone,
+                    session_data=encrypted,
+                    is_active=True
+                )
+                session.add(account)
+                await session.commit()
+                app_logger.info(f"Аккаунт {phone} успешно создан")
+                return account
+            except Exception as e:
+                app_logger.error(f"Ошибка создания аккаунта: {str(e)}")
+                raise
 
     async def get_user_accounts(self, user_id: int) -> List[Account]:
-        app_logger.debug("Получены аккаунты пользователя Telegram")
+        user = await get_user_by_user_id(user_id)
+        app_logger.debug(f"Получение аккаунтов пользователя {user.full_name}")
         async with async_session() as session:
             result = await session.execute(
                 select(Account).where(Account.user_id == user_id)
             )
-            return result.scalars().all()
+            accounts = result.scalars().all()
+            app_logger.info(f"Найдено {len(accounts)} аккаунтов для пользователя {user.full_name}")
+            return accounts
 
     async def toggle_account(self, user_id: int, phone: str) -> tuple[bool, bool]:
-        app_logger.debug("Изменяется активность аккаунта Telegram")
+        user = await get_user_by_user_id(user_id)
+        app_logger.info(f"Изменение статуса аккаунта {phone} пользователя {user.full_name}")
         async with async_session() as session:
-            account = await session.execute(
-                select(Account).where(
-                    and_(
-                        Account.user_id == user_id,
-                        Account.phone == phone
+            try:
+                account = await session.execute(
+                    select(Account).where(
+                        and_(
+                            Account.user_id == user_id,
+                            Account.phone == phone
+                        )
                     )
                 )
-            )
-            account = account.scalar()
-            if account:
+                account = account.scalar()
+
+                if not account:
+                    app_logger.warning(f"Аккаунт {phone} не найден")
+                    return False, False, False
+
                 old_status = account.is_active
                 account.is_active = not account.is_active
                 new_status = account.is_active
                 await session.commit()
-                return True, old_status, new_status
-            return False, False, False
 
+                app_logger.info(f"Статус аккаунта {phone} изменен: {'активен' if new_status else 'неактивен'}")
+                return True, old_status, new_status
+
+            except Exception as e:
+                app_logger.error(f"Ошибка изменения статуса: {str(e)}")
+                return False, False, False
 
     async def update_last_active(self, phone: str):
-        app_logger.debug("Обновляется дата последнего входа аккаунта Telegram")
+        app_logger.debug(f"Обновление времени активности для {phone}")
         async with async_session() as session:
             account = await session.execute(
-                select(Account).where(Account.phone == phone)
-            )
+                select(Account).where(Account.phone == phone))
             account = account.scalar()
             if account:
                 account.last_active = datetime.now()
                 await session.commit()
+                app_logger.info(f"Обновлено время активности для {phone}")
 
     async def get_all_active_accounts(self) -> List[Account]:
-        app_logger.debug("Получены активные аккаунты Telegram")
+        app_logger.debug("Получение всех активных аккаунтов")
         async with async_session() as session:
             result = await session.execute(
-                select(Account).where(Account.is_active == True)
-            )
-            return result.scalars().all()
-
+                select(Account).where(Account.is_active == True))
+            accounts = result.scalars().all()
+            app_logger.info(f"Найдено {len(accounts)} активных аккаунтов")
+            return accounts
 
 class UserActivityManager:
     def __init__(self):
@@ -141,20 +168,22 @@ class UserActivityManager:
         self.lock = asyncio.Lock()
 
     async def start_user_activity(self, user_id: int, service: AccountService):
+        user = await get_user_by_user_id(user_id)
         async with self.lock:
             if user_id not in self.user_tasks:
                 self.user_tasks[user_id] = asyncio.create_task(
                     self._user_monitor_loop(user_id, service)
                 )
-                app_logger.info(f"Activity check started for user {user_id}")
+                app_logger.info(f"Запущена проверка активности для пользователя {user.full_name}")
 
     async def stop_user_activity(self, user_id: int):
+        user = await get_user_by_user_id(user_id)
         async with self.lock:
             task = self.user_tasks.get(user_id)
             if task:
                 task.cancel()
                 del self.user_tasks[user_id]
-                app_logger.info(f"Activity check stopped for user {user_id}")
+                app_logger.info(f"Остановлена проверка активности для пользователя {user.full_name}")
 
     async def stop_account_activity(self, phone: str):
         async with self.lock:
@@ -162,66 +191,88 @@ class UserActivityManager:
             if task and not task.done():
                 task.cancel()
                 del self.account_tasks[phone]
-                app_logger.info(f"Задачи для аккаунта {phone} остановлены")
+                app_logger.info(f"Остановлена активность для аккаунта {phone}")
 
     async def _user_monitor_loop(self, user_id: int, service: AccountService):
+        app_logger.info(f"Запуск мониторинга активности для пользователя {user_id}")
+        # Получаем объект текущего юзера по user_id из модели user
+        user = await get_user_by_user_id(user_id)
+
         while True:
             try:
                 accounts = await service.get_user_accounts(user_id)
                 await self._manage_account_tasks(accounts, service)
-                await asyncio.sleep(60)  # Check every minute for new accounts
-                app_logger.info(f"Activity check for user {user_id}")
+                await asyncio.sleep(60)
+                app_logger.debug(f"Проверка состояния для пользователя {user.full_name}")
             except asyncio.CancelledError:
+                app_logger.warning(f"Мониторинг активности для пользователя {user.full_name} прерван")
                 break
             except Exception as e:
+                app_logger.error(f"Ошибка мониторинга: {str(e)}")
                 await asyncio.sleep(60)
 
     async def _manage_account_tasks(self, accounts: List[Account], service: AccountService):
         current_phones = {acc.phone for acc in accounts if acc.is_active}
         existing_phones = set(self.account_tasks.keys())
 
-        # Start new tasks
+        # Запуск новых задач
         for phone in current_phones - existing_phones:
             account = next(acc for acc in accounts if acc.phone == phone)
             self.account_tasks[phone] = asyncio.create_task(
                 self._account_activity_loop(account, service)
             )
-            app_logger.info(f"Activity check started for {phone}")
+            app_logger.info(f"Запущена активность для аккаунта {phone}")
 
-        # Stop removed tasks
+        # Остановка удаленных задач
         for phone in existing_phones - current_phones:
             self.account_tasks[phone].cancel()
             del self.account_tasks[phone]
-            app_logger.info(f"Activity check stopped for {phone}")
+            app_logger.info(f"Остановлена активность для аккаунта {phone}")
 
     async def _account_activity_loop(self, account: Account, service: AccountService):
+        app_logger.info(f"Запуск цикла активности для {account.phone}")
         while True:
             try:
                 await self._perform_activity(account, service)
                 interval = random.randint(CHECK_INTERVAL_MIN, CHECK_INTERVAL_MAX)
-                app_logger.info(f"Activity check for {account.phone}")
+                app_logger.debug(f"Следующая проверка для {account.phone} через {interval} сек")
                 await asyncio.sleep(interval)
             except asyncio.CancelledError:
+                app_logger.warning(f"Цикл активности для {account.phone} прерван")
                 break
             except Exception as e:
+                app_logger.error(f"Ошибка в цикле активности: {str(e)}")
                 await asyncio.sleep(60)
 
     async def _perform_activity(self, account: Account, service: AccountService):
         try:
+            app_logger.debug(f"Выполнение активности для {account.phone}")
             session_str = await service.decrypt_session(account.session_data)
-            client = await service._create_client(session_str)
 
-            await client.connect()
+            # Используем кэшированную сессию
+            if session_str not in service.active_sessions:
+                app_logger.debug(f"Нет активной сессии для {account.phone}, создаем новую")
+                client = await service._create_client(session_str)
+                service.active_sessions[session_str] = client
+            else:
+                client = service.active_sessions[session_str]
+
+            if not client.is_connected():
+                await client.connect()
+
             if not await client.is_user_authorized():
-                app_logger.error(f"Session expired for {account.phone}")
+                app_logger.error(f"Сессия {account.phone} устарела")
                 return
 
             me = await client.get_me()
             if isinstance(me, TelegramUser):
                 await service.update_last_active(account.phone)
-                app_logger.info(f"Activity success for {account.phone}")
+                app_logger.info(f"Успешная активность для {account.phone}")
 
         except Exception as e:
-            app_logger.error(f"Activity error for {account.phone}: {str(e)}")
+            app_logger.error(f"Ошибка активности для {account.phone}: {str(e)}")
+            if session_str in service.active_sessions:
+                del service.active_sessions[session_str]
         finally:
-            await client.disconnect()
+            if client and client.is_connected():
+                await client.disconnect()
