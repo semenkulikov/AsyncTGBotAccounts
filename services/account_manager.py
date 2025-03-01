@@ -20,18 +20,6 @@ class AccountService:
     async def decrypt_session(self, encrypted_data: bytes) -> str:
         return self.cipher.decrypt(encrypted_data).decode()
 
-    # async def create_user_if_not_exists(self, user_id: int, full_name: str, username: str):
-    #     async with async_session() as session:
-    #         user = await session.get(User, user_id)
-    #         if not user:
-    #             user = User(
-    #                 user_id=str(user_id),
-    #                 full_name=full_name,
-    #                 username=username,
-    #                 is_premium=False
-    #             )
-    #             session.add(user)
-    #             await session.commit()
 
     async def create_account(self, user_id: int, phone: str, session_str: str):
         async with async_session() as session:

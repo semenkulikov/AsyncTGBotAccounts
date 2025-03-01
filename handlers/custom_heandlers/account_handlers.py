@@ -13,6 +13,7 @@ from states.states import AddAccountStates, AccountStates
 
 @dp.message(Command("add_account"))
 async def add_account_start(message: Message, state: FSMContext):
+    app_logger.info(f"Пользователь @{message.from_user.username} запросил создание аккаунта.")
     await message.answer("Введите номер телефона в формате +79123456789:")
     await state.set_state(AddAccountStates.wait_phone)
 
@@ -28,6 +29,7 @@ async def process_phone(message: Message, state: FSMContext):
     sent_code = await client.send_code_request(phone)
 
     await state.update_data(phone=phone, client=client, sent_code=sent_code)
+    app_logger.info(f"Пользователь @{message.from_user.username} ввел номер телефона: {phone}.")
     await message.answer("Введите код подтверждения из SMS:")
     await state.set_state(AddAccountStates.wait_code)
 
@@ -46,6 +48,7 @@ async def process_code(message: Message, state: FSMContext):
         return
     except Exception as e:
         await message.answer(f"Ошибка: {str(e)}. Начните заново.")
+        app_logger.error(f"Не удалось подключить аккаунт {data['phone']}: {e}")
         await state.clear()
         return
 
@@ -55,6 +58,7 @@ async def process_code(message: Message, state: FSMContext):
     app_logger.info("Запущена фоновая задача для входа в аккаунты")
     await service.create_account(message.from_user.id, data['phone'], session_str)
     await message.answer("Аккаунт успешно добавлен!")
+    app_logger.info(f"Пользователь @{message.from_user.username} успешно добавил аккаунт.")
     await client.disconnect()
     await state.clear()
 
@@ -71,8 +75,10 @@ async def process_2fa(message: Message, state: FSMContext):
         await service.create_account(message.from_user.id, data['phone'], session_str)
         await activity_manager.start_user_activity(message.from_user.id, service)
         await message.answer("Аккаунт успешно добавлен!")
+        app_logger.info(f"Пользователь @{message.from_user.username} успешно добавил аккаунт.")
     except Exception as e:
         await message.answer(f"Ошибка: {str(e)}. Начните заново.")
+        app_logger.error(f"Не удалось подключить аккаунт {data['phone']}: {e}")
 
     await data['client'].disconnect()
     await state.clear()
@@ -82,6 +88,7 @@ async def process_2fa(message: Message, state: FSMContext):
 async def list_accounts(message: Message):
     service = AccountService(ENCRYPTION_KEY)
     accounts = await service.get_user_accounts(message.from_user.id)
+    app_logger.info(f"Пользователь @{message.from_user.username} запросил список своих аккаунтов")
 
     if not accounts:
         return await message.answer("У вас нет привязанных аккаунтов")
@@ -106,6 +113,7 @@ async def process_toggle(message: Message, state: FSMContext):
 
     if success:
         await message.answer("Статус аккаунта изменен")
+        app_logger.info(f"Пользователь @{message.from_user.username} изменил статус аккаунта {message.text}")
     else:
         await message.answer("Аккаунт не найден")
     await state.clear()
