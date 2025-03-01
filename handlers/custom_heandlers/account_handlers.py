@@ -1,10 +1,12 @@
-from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery
+import asyncio
+import time
+from telethon.sessions import StringSession
+from aiogram.types import Message
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import Command
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
-
+from telethon import types as tg_types
 from config_data.config import ENCRYPTION_KEY, API_ID, API_HASH
 from loader import dp, app_logger, activity_manager
 from services.account_manager import AccountService
@@ -23,15 +25,37 @@ async def process_phone(message: Message, state: FSMContext):
     phone = message.text.strip()
     if not phone.startswith('+'):
         return await message.answer("Неверный формат номера. Попробуйте снова:")
+    try:
+        client = TelegramClient(
+            session=None,
+            api_id=API_ID,
+            api_hash=API_HASH,
+            device_model="Xiaomi Redmi Note 13",
+            app_version="10.1.5",
+            system_version="Android 13",
+            lang_code="ru",
+            system_lang_code="ru-RU"
+        )
+        await client.connect()
+        await asyncio.sleep(2)  # Anti-flood delay
 
-    client = TelegramClient(None, API_ID, API_HASH)
-    await client.connect()
-    sent_code = await client.send_code_request(phone)
+        sent_code = await client.send_code_request(phone)
 
-    await state.update_data(phone=phone, client=client, sent_code=sent_code)
-    app_logger.info(f"Пользователь @{message.from_user.username} ввел номер телефона: {phone}.")
-    await message.answer("Введите код подтверждения из SMS:")
-    await state.set_state(AddAccountStates.wait_code)
+        await state.update_data({
+            'phone': phone,
+            'client': client,
+            'sent_code': sent_code,
+            'attempts': 0,
+            'last_request': time.time()
+        })
+        app_logger.info(f"Пользователь @{message.from_user.username} ввел номер телефона: {phone}.")
+        await message.answer("Введите код подтверждения из SMS:")
+        await state.set_state(AddAccountStates.wait_code)
+
+    except Exception as e:
+        await message.answer(f"Ошибка: {str(e)}")
+        app_logger.error(f"Connection error: {str(e)}")
+        await state.clear()
 
 
 @dp.message(AddAccountStates.wait_code)
@@ -39,28 +63,50 @@ async def process_code(message: Message, state: FSMContext):
     data = await state.get_data()
     code = message.text.strip()
 
+    # Anti-bruteforce protection
+    if time.time() - data['last_request'] > 300:
+        await message.answer("Время сессии истекло. Начните заново.")
+        await state.clear()
+        return
+
     try:
         client = data['client']
-        await client.sign_in(data['phone'], code, phone_code_hash=data['sent_code'].phone_code_hash)
+        session = client.session
+
+        # Явное сохранение сессии перед авторизацией
+        if not isinstance(session, StringSession):
+            client.session = StringSession()
+
+        await client.sign_in(
+            phone=data['phone'],
+            code=code,
+            phone_code_hash=data['sent_code'].phone_code_hash
+        )
+        session_str = data['client'].session.save()
+        if not await AccountService(ENCRYPTION_KEY).validate_session(session_str):
+            raise ValueError("Invalid session")
+
+        service = AccountService(ENCRYPTION_KEY)
+        await activity_manager.start_user_activity(message.from_user.id, service)
+        app_logger.info("Запущена фоновая задача для входа в аккаунты")
+        await service.create_account(message.from_user.id, data['phone'], session_str)
+        await message.answer("Аккаунт успешно добавлен!")
+        app_logger.info(f"Пользователь @{message.from_user.username} успешно добавил аккаунт.")
+        await client.disconnect()
+        await state.clear()
+
     except SessionPasswordNeededError:
         await message.answer("Введите пароль двухфакторной аутентификации:")
         await state.set_state(AddAccountStates.wait_2fa)
         return
+    except tg_types.PhoneCodeExpiredError:
+        await message.answer("Код устарел. Запросите новый код.")
+        await process_phone(message, state)
     except Exception as e:
-        await message.answer(f"Ошибка: {str(e)}. Начните заново.")
-        app_logger.error(f"Не удалось подключить аккаунт {data['phone']}: {e}")
-        await state.clear()
-        return
-
-    session_str = client.session.save()
-    service = AccountService(ENCRYPTION_KEY)
-    await activity_manager.start_user_activity(message.from_user.id, service)
-    app_logger.info("Запущена фоновая задача для входа в аккаунты")
-    await service.create_account(message.from_user.id, data['phone'], session_str)
-    await message.answer("Аккаунт успешно добавлен!")
-    app_logger.info(f"Пользователь @{message.from_user.username} успешно добавил аккаунт.")
-    await client.disconnect()
-    await state.clear()
+        data['attempts'] += 1
+        if data['attempts'] > 3:
+            await message.answer("Слишком много попыток. Начните заново.")
+            await state.clear()
 
 
 @dp.message(AddAccountStates.wait_2fa)
@@ -69,19 +115,51 @@ async def process_2fa(message: Message, state: FSMContext):
     data = await state.get_data()
 
     try:
-        await data['client'].sign_in(password=password)
-        session_str = data['client'].session.save()
-        service = AccountService(ENCRYPTION_KEY)
-        await service.create_account(message.from_user.id, data['phone'], session_str)
-        await activity_manager.start_user_activity(message.from_user.id, service)
-        await message.answer("Аккаунт успешно добавлен!")
-        app_logger.info(f"Пользователь @{message.from_user.username} успешно добавил аккаунт.")
-    except Exception as e:
-        await message.answer(f"Ошибка: {str(e)}. Начните заново.")
-        app_logger.error(f"Не удалось подключить аккаунт {data['phone']}: {e}")
+        client = data['client']
+        session = client.session
 
-    await data['client'].disconnect()
-    await state.clear()
+        # Явное сохранение сессии перед авторизацией
+        if not isinstance(session, StringSession):
+            client.session = StringSession()
+
+        await client.sign_in(
+            password=password,
+            phone_code_hash=data['sent_code'].phone_code_hash
+        )
+
+        # Проверка и сохранение сессии
+        if not client.session:
+            raise ValueError("Сессия не создана")
+
+        session_str = client.session.save()
+
+        if not session_str or len(session_str) < 50:
+            raise ValueError("Неверный формат сессии")
+
+        # Валидация сессии
+        service = AccountService(ENCRYPTION_KEY)
+        if not await service.validate_session(session_str):
+            raise ValueError("Невалидная сессия")
+
+        # Сохранение в базу данных
+        await service.create_account(
+            user_id=message.from_user.id,
+            phone=data['phone'],
+            session_str=session_str
+        )
+
+        await message.answer("✅ Аккаунт успешно добавлен!")
+        app_logger.info(f"Успешная авторизация 2FA для {data['phone']}")
+
+    except Exception as e:
+        error_msg = f"Ошибка: {str(e)}"
+        await message.answer(f"❌ {error_msg}\nНачните заново.")
+        app_logger.error(f"2FA failed: {error_msg}")
+
+    finally:
+        if client:
+            await client.disconnect()
+        await state.clear()
 
 
 @dp.message(Command("my_accounts"))
