@@ -1,14 +1,15 @@
 import asyncio
-import time
-from telethon.sessions import StringSession
-from aiogram.types import Message
-from aiogram.fsm.context import FSMContext
+
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.types import Message
 from telethon import TelegramClient
-from telethon.errors import SessionPasswordNeededError
 from telethon import types as tg_types
+from telethon.errors import SessionPasswordNeededError
+from telethon.sessions import StringSession
+from services.services import activity_manager
 from config_data.config import ENCRYPTION_KEY, API_ID, API_HASH
-from loader import dp, app_logger, activity_manager
+from loader import dp, app_logger
 from services.account_manager import AccountService
 from states.states import AddAccountStates, AccountStates
 
@@ -24,10 +25,15 @@ async def add_account_start(message: Message, state: FSMContext):
 async def process_phone(message: Message, state: FSMContext):
     phone = message.text.strip()
     if not phone.startswith('+'):
-        return await message.answer("Неверный формат номера. Попробуйте снова:")
+        await message.answer("Неверный формат номера. Попробуйте снова")
+        await state.clear()
+
+    # Явно создаем новую строковую сессию
+    session = StringSession()
+
     try:
         client = TelegramClient(
-            session=None,
+            session=session,
             api_id=API_ID,
             api_hash=API_HASH,
             device_model="Xiaomi Redmi Note 13",
@@ -41,20 +47,19 @@ async def process_phone(message: Message, state: FSMContext):
 
         sent_code = await client.send_code_request(phone)
 
-        await state.update_data({
-            'phone': phone,
-            'client': client,
-            'sent_code': sent_code,
-            'attempts': 0,
-            'last_request': time.time()
-        })
+        await state.update_data(
+            phone=phone,
+            client=client,
+            sent_code=sent_code,
+            session=session  # Сохраняем объект сессии
+        )
         app_logger.info(f"Пользователь @{message.from_user.username} ввел номер телефона: {phone}.")
         await message.answer("Введите код подтверждения из SMS:")
         await state.set_state(AddAccountStates.wait_code)
 
     except Exception as e:
-        await message.answer(f"Ошибка: {str(e)}")
-        app_logger.error(f"Connection error: {str(e)}")
+        await message.answer(f"Ошибка: {str(e)}", parse_mode=None)
+        await client.disconnect()
         await state.clear()
 
 
@@ -62,12 +67,6 @@ async def process_phone(message: Message, state: FSMContext):
 async def process_code(message: Message, state: FSMContext):
     data = await state.get_data()
     code = message.text.strip()
-
-    # Anti-bruteforce protection
-    if time.time() - data['last_request'] > 300:
-        await message.answer("Время сессии истекло. Начните заново.")
-        await state.clear()
-        return
 
     try:
         client = data['client']
@@ -116,7 +115,7 @@ async def process_2fa(message: Message, state: FSMContext):
 
     try:
         client = data['client']
-        session = client.session
+        session = data['session']
 
         # Явное сохранение сессии перед авторизацией
         if not isinstance(session, StringSession):
@@ -131,7 +130,8 @@ async def process_2fa(message: Message, state: FSMContext):
         if not client.session:
             raise ValueError("Сессия не создана")
 
-        session_str = client.session.save()
+        session_str = session.save()
+        app_logger.debug(f"Сохранена строка сессии: {session_str}")
 
         if not session_str or len(session_str) < 50:
             raise ValueError("Неверный формат сессии")
@@ -148,12 +148,12 @@ async def process_2fa(message: Message, state: FSMContext):
             session_str=session_str
         )
 
-        await message.answer("✅ Аккаунт успешно добавлен!")
+        await message.answer("✅ Аккаунт успешно добавлен!", parse_mode=None)
         app_logger.info(f"Успешная авторизация 2FA для {data['phone']}")
 
     except Exception as e:
         error_msg = f"Ошибка: {str(e)}"
-        await message.answer(f"❌ {error_msg}\nНачните заново.")
+        await message.answer(f"❌ {error_msg}\nНачните заново.", parse_mode=None)
         app_logger.error(f"2FA failed: {error_msg}")
 
     finally:
@@ -175,7 +175,7 @@ async def list_accounts(message: Message):
         [f"{i + 1}. {acc.phone} ({'активен' if acc.is_active else 'неактивен'})"
          for i, acc in enumerate(accounts)]
     )
-    await message.answer(text)
+    await message.answer(text, parse_mode=None)
 
 
 @dp.message(Command("toggle_account"))
@@ -187,11 +187,17 @@ async def toggle_account_start(message: Message, state: FSMContext):
 @dp.message(AccountStates.wait_toggle_phone)
 async def process_toggle(message: Message, state: FSMContext):
     service = AccountService(ENCRYPTION_KEY)
-    success = await service.toggle_account(message.from_user.id, message.text)
+    success, old_status, new_status = await service.toggle_account(message.from_user.id, message.text)
 
     if success:
-        await message.answer("Статус аккаунта изменен")
-        app_logger.info(f"Пользователь @{message.from_user.username} изменил статус аккаунта {message.text}")
+        status_change = (f"Статус изменен с {'активен' if old_status else 'неактивен'} на "
+                         f"{'активен' if new_status else 'неактивен'}")
+        await message.answer(f"✅ {status_change}")
+        app_logger.info(f"Статус аккаунта {message.text} изменен: {status_change}")
+
+        # Остановка задач для неактивных аккаунтов
+        if not new_status:
+            await activity_manager.stop_account_activity(message.text)
     else:
         await message.answer("Аккаунт не найден")
     await state.clear()

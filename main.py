@@ -1,7 +1,6 @@
 import asyncio
-from loader import bot, dp, app_logger, activity_manager
-from services.account_manager import AccountService, UserActivityManager
-from config_data.config import ADMIN_ID, ENCRYPTION_KEY, API_ID, API_HASH
+from loader import bot, dp, app_logger
+from services.services import service, activity_manager
 from database.models import Base, engine
 import handlers
 
@@ -11,9 +10,6 @@ async def main():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     app_logger.info("Подключение к базе данных...")
-
-    # Инициализация сервисов
-    service = AccountService(ENCRYPTION_KEY)
 
     # Запуск фоновых задач для существующих аккаунтов
     accounts = await service.get_all_active_accounts()
