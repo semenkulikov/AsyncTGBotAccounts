@@ -5,6 +5,7 @@ import asyncio
 import random
 from datetime import datetime
 from telethon import TelegramClient
+from telethon.errors import SessionExpiredError
 from telethon.sessions import StringSession
 from config_data.config import CHECK_INTERVAL_MIN, CHECK_INTERVAL_MAX, API_ID, API_HASH
 from database.models import Account, User, async_session
@@ -12,7 +13,7 @@ from telethon.tl.types import User as TelegramUser
 from telethon.network import ConnectionTcpAbridged
 
 from database.query_orm import get_user_by_user_id
-from loader import app_logger
+from loader import app_logger, bot
 import traceback
 
 
@@ -161,6 +162,22 @@ class AccountService:
             app_logger.info(f"Найдено {len(accounts)} активных аккаунтов")
             return accounts
 
+    async def delete_account(self, phone: str) -> bool:
+        async with async_session() as session:
+            try:
+                result = await session.execute(
+                    select(Account).where(Account.phone == phone)
+                )
+                account = result.scalar()
+                if account:
+                    await session.delete(account)
+                    await session.commit()
+                    app_logger.info(f"Аккаунт {phone} удален из базы")
+                    return True
+            except Exception as e:
+                app_logger.error(f"Ошибка удаления аккаунта: {str(e)}")
+            return False
+
 class UserActivityManager:
     def __init__(self):
         self.user_tasks: Dict[int, asyncio.Task] = {}
@@ -245,13 +262,24 @@ class UserActivityManager:
                 await asyncio.sleep(60)
 
     async def _perform_activity(self, account: Account, service: AccountService):
+        client = None
+        session_str = None
         try:
-            app_logger.debug(f"Выполнение активности для {account.phone}")
             session_str = await service.decrypt_session(account.session_data)
+            app_logger.debug(f"Выполнение активности для {account.phone}")
+
+            # Проверка валидности сессии перед использованием
+            if not await service.validate_session(session_str):
+                app_logger.warning(f"Сессия {account.phone} невалидна, удаляем...")
+                await service.delete_account(account.phone)
+                await self._notify_user(account.user_id,
+                                        f"Сессия {account.phone} устарела. "
+                                        f"Пожалуйста, добавьте аккаунт заново.")
+                return
 
             # Используем кэшированную сессию
             if session_str not in service.active_sessions:
-                app_logger.debug(f"Нет активной сессии для {account.phone}, создаем новую")
+                app_logger.debug(f"Создаем новое подключение для {account.phone}")
                 client = await service._create_client(session_str)
                 service.active_sessions[session_str] = client
             else:
@@ -260,19 +288,46 @@ class UserActivityManager:
             if not client.is_connected():
                 await client.connect()
 
+            # Дополнительная проверка авторизации
             if not await client.is_user_authorized():
-                app_logger.error(f"Сессия {account.phone} устарела")
-                return
+                raise ConnectionError("Сессия не авторизована")
 
             me = await client.get_me()
             if isinstance(me, TelegramUser):
                 await service.update_last_active(account.phone)
                 app_logger.info(f"Успешная активность для {account.phone}")
 
+        except (SessionExpiredError, ConnectionError, ValueError) as e:
+            app_logger.error(f"Критическая ошибка сессии {account.phone}: {str(e)}")
+            await self._handle_invalid_session(service, account.phone, session_str, account.user_id)
+
         except Exception as e:
             app_logger.error(f"Ошибка активности для {account.phone}: {str(e)}")
-            if session_str in service.active_sessions:
-                del service.active_sessions[session_str]
+            app_logger.debug(f"Трассировка:\n{traceback.format_exc()}")
+
         finally:
             if client and client.is_connected():
                 await client.disconnect()
+            # Удаляем сессию из кэша при любой ошибке
+            if session_str and session_str in service.active_sessions:
+                del service.active_sessions[session_str]
+
+    async def _handle_invalid_session(self, service: AccountService, phone: str, session_str: str, user_id: int):
+        """Обработка невалидной сессии"""
+        if session_str and session_str in service.active_sessions:
+            del service.active_sessions[session_str]
+
+        if await service.delete_account(phone):
+            await self._notify_user(user_id,
+                                    f"⚠️ Сессия {phone} была автоматически удалена из-за ошибки авторизации. "
+                                    f"Пожалуйста, добавьте аккаунт заново.")
+        else:
+            app_logger.error(f"Не удалось удалить аккаунт {phone}")
+
+    async def _notify_user(self, user_id: int, message: str):
+        """Отправка уведомления пользователю"""
+        try:
+            await bot.send_message(user_id, message)
+            app_logger.info(f"Уведомление отправлено пользователю {user_id}")
+        except Exception as e:
+            app_logger.error(f"Ошибка отправки уведомления: {str(e)}")
