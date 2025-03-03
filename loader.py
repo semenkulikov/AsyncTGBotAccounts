@@ -25,10 +25,10 @@ file_handler = RotatingFileHandler(
     mode='a', maxBytes=2*1024*1024, backupCount=1, encoding="utf8"
 )
 file_handler.setFormatter(log_formatter)
-file_handler.setLevel(logging.INFO)
+file_handler.setLevel(logging.DEBUG)
 stream_handler = logging.StreamHandler()
 stream_handler.setFormatter(log_formatter)
-stream_handler.setLevel(logging.DEBUG)
+stream_handler.setLevel(logging.INFO)
 
 app_logger = logging.getLogger("app_logger")
 app_logger.setLevel(logging.DEBUG)

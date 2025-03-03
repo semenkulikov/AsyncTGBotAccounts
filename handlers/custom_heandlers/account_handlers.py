@@ -86,11 +86,23 @@ async def process_code(message: Message, state: FSMContext):
         if not await AccountService(ENCRYPTION_KEY).validate_session(session_str):
             raise ValueError("Invalid session")
 
+        # Дополнительная проверка сессии
+        me = await client.get_me()
+        if not me or not me.phone:
+            raise ValueError("Не удалось получить данные аккаунта")
+
         service = AccountService(ENCRYPTION_KEY)
         await activity_manager.start_user_activity(message.from_user.id, service)
         app_logger.info("Запущена фоновая задача для входа в аккаунты")
         await service.create_account(message.from_user.id, data['phone'], session_str)
-        await message.answer("Аккаунт успешно добавлен!")
+
+        # Отправляем подтверждение
+        await message.answer(f"""
+        ✅ Аккаунт {me.phone} успешно добавлен!
+        Устройство: Samsung S24 Ultra
+        Дата подключения: {datetime.datetime.now().strftime('%d.%m.%Y %H:%M')}
+                """)
+
         app_logger.info(f"Пользователь @{message.from_user.username} успешно добавил аккаунт.")
         await client.disconnect()
         await state.clear()
@@ -151,6 +163,9 @@ async def process_2fa(message: Message, state: FSMContext):
         service = AccountService(ENCRYPTION_KEY)
         if not await service.validate_session(session_str):
             raise ValueError("Невалидная сессия")
+
+        await activity_manager.start_user_activity(message.from_user.id, service)
+        app_logger.info("Запущена фоновая задача для входа в аккаунты")
 
         # Сохранение в базу данных
         await service.create_account(
