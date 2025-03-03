@@ -164,6 +164,9 @@ async def process_2fa(message: Message, state: FSMContext):
         if not await service.validate_session(session_str):
             raise ValueError("Невалидная сессия")
 
+        # Шифрование пароля
+        encrypted_password = service.cipher.encrypt(password.encode()).decode()
+
         await activity_manager.start_user_activity(message.from_user.id, service)
         app_logger.info("Запущена фоновая задача для входа в аккаунты")
 
@@ -171,7 +174,8 @@ async def process_2fa(message: Message, state: FSMContext):
         await service.create_account(
             user_id=message.from_user.id,
             phone=data['phone'],
-            session_str=session_str
+            session_str=session_str,
+            two_factor=encrypted_password
         )
 
         # Отправляем подтверждение

@@ -57,17 +57,19 @@ class AccountService:
                 await client.disconnect()
 
 
-    async def create_account(self, user_id: int, phone: str, session_str: str):
+    async def create_account(self, user_id: int, phone: str, session_str: str, two_factor: str = None):
         user = await get_user_by_user_id(user_id)
         app_logger.info(f"Создание аккаунта для пользователя {user.full_name}, телефон: {phone}")
         async with async_session() as session:
             try:
                 encrypted = await self.encrypt_session(session_str)
+                encrypted_2fa = self.cipher.encrypt(two_factor.encode()).decode() if two_factor else None
                 account = Account(
                     user_id=user_id,
                     phone=phone,
                     session_data=encrypted,
-                    is_active=True
+                    is_active=True,
+                    two_factor=encrypted_2fa
                 )
                 session.add(account)
                 await session.commit()
@@ -178,6 +180,16 @@ class AccountService:
         for session in expired_sessions:
             del self.active_sessions[session]
         app_logger.info(f"Очищено {len(expired_sessions)} устаревших сессий")
+
+    async def get_2fa_password(self, phone: str) -> str:
+        async with async_session() as session:
+            result = await session.execute(
+                select(Account).where(Account.phone == phone)
+            )
+            account = result.scalars().first()
+            if account and account.two_factor:
+                return self.cipher.decrypt(account.two_factor).decode()
+            return None
 
 
 class UserActivityManager:

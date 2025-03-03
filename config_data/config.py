@@ -28,7 +28,7 @@ API_ID = int(os.getenv('API_ID'))
 API_HASH = os.getenv('API_HASH')
 ENCRYPTION_KEY = os.getenv('ENCRYPTION_KEY')
 
-CHECK_INTERVAL_MIN = 120  # 600  # 10 минут
-CHECK_INTERVAL_MAX = 150  # 3600 # 1 час
+CHECK_INTERVAL_MIN = 600  # 10 минут
+CHECK_INTERVAL_MAX = 3600 # 1 час
 
 DATABASE_URL = f"sqlite+aiosqlite:///{os.path.join(BASE_DIR, 'database', 'accounts.db')}"
