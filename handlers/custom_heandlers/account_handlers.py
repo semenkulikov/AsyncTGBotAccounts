@@ -1,11 +1,12 @@
 import asyncio
+import datetime
 
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 from telethon import TelegramClient
 from telethon import types as tg_types
-from telethon.errors import SessionPasswordNeededError
+from telethon.errors import SessionPasswordNeededError, FloodWaitError
 from telethon.sessions import StringSession
 from services.services import activity_manager
 from config_data.config import ENCRYPTION_KEY, API_ID, API_HASH
@@ -121,10 +122,14 @@ async def process_2fa(message: Message, state: FSMContext):
         if not isinstance(session, StringSession):
             client.session = StringSession()
 
-        await client.sign_in(
-            password=password,
-            phone_code_hash=data['sent_code'].phone_code_hash
-        )
+        try:
+            await client.sign_in(
+                password=password,
+                phone_code_hash=data['sent_code'].phone_code_hash
+            )
+        except FloodWaitError as e:
+            await message.answer(f"Слишком много попыток. Попробуйте через {e.seconds} секунд")
+            return
 
         # Проверка и сохранение сессии
         if not client.session:
@@ -135,6 +140,12 @@ async def process_2fa(message: Message, state: FSMContext):
 
         if not session_str or len(session_str) < 50:
             raise ValueError("Неверный формат сессии")
+
+        # Дополнительная проверка через получение информации об аккаунте
+        me = await client.get_me()
+        if not me or not me.phone:
+            raise ValueError("Не удалось получить информацию об аккаунте")
+
 
         # Валидация сессии
         service = AccountService(ENCRYPTION_KEY)
@@ -148,7 +159,12 @@ async def process_2fa(message: Message, state: FSMContext):
             session_str=session_str
         )
 
-        await message.answer("✅ Аккаунт успешно добавлен!", parse_mode=None)
+        # Отправляем подтверждение
+        await message.answer(f"""
+        ✅ Аккаунт {me.phone} успешно добавлен!
+        Устройство: Samsung S24 Ultra
+        Дата подключения: {datetime.datetime.now().strftime('%d.%m.%Y %H:%M')}
+                """)
         app_logger.info(f"Успешная авторизация 2FA для {data['phone']}")
 
     except Exception as e:
