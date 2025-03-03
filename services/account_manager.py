@@ -5,7 +5,7 @@ import asyncio
 import random
 from datetime import datetime
 from telethon import TelegramClient
-from telethon.errors import SessionExpiredError
+from telethon.errors import SessionExpiredError, SessionPasswordNeededError, AuthKeyError, FloodWaitError
 from telethon.sessions import StringSession
 from config_data.config import CHECK_INTERVAL_MIN, CHECK_INTERVAL_MAX, API_ID, API_HASH
 from database.models import Account, User, async_session
@@ -50,31 +50,42 @@ class AccountService:
         """Проверка и кэширование активной сессии"""
         app_logger.info(f"Проверка сессии: {session_str[:10]}...")
 
+        # Проверка кэша с учетом TTL (30 минут)
         if session_str in self.active_sessions:
-            app_logger.debug("Использование кэшированной сессии")
-            return True
+            cached_time = self.active_sessions[session_str]['timestamp']
+            if (datetime.now() - cached_time).seconds < 1800:
+                app_logger.debug("Использование кэшированной сессии")
+                return True
+            del self.active_sessions[session_str]
 
         client = None
         try:
             client = await self._create_client(session_str)
             await client.connect()
 
-            if not await client.is_user_authorized():
-                app_logger.warning("Сессия не авторизована")
-                return False
-
+            # Добавляем проверку flood-wait
             me = await client.get_me()
             if not me or not hasattr(me, 'phone'):
-                app_logger.error("Получен невалидный объект пользователя")
+                app_logger.warning("Не удалось получить информацию об аккаунте")
                 return False
 
-            self.active_sessions[session_str] = client
+            # Обновляем кэш
+            self.active_sessions[session_str] = {
+                'client': client,
+                'timestamp': datetime.now()
+            }
             app_logger.info(f"Успешная проверка сессии для {me.phone}")
             return True
 
+        except (SessionPasswordNeededError, AuthKeyError) as e:
+            app_logger.warning(f"Сессия требует повторной авторизации: {str(e)}")
+            return False
+        except FloodWaitError as e:
+            app_logger.warning(f"Требуется ожидание: {e.seconds} секунд")
+            await asyncio.sleep(e.seconds)
+            return await self.validate_session(session_str)
         except Exception as e:
             app_logger.error(f"Ошибка проверки сессии: {str(e)}")
-            app_logger.debug(f"Трассировка ошибки:\n{traceback.format_exc()}")
             return False
         finally:
             if client and session_str not in self.active_sessions:
@@ -166,17 +177,42 @@ class AccountService:
         async with async_session() as session:
             try:
                 result = await session.execute(
-                    select(Account).where(Account.phone == phone)
-                )
+                    select(Account).where(Account.phone == phone))
                 account = result.scalar()
                 if account:
+                # Получаем сессию для выхода из аккаунта
+                    session_str = await self.decrypt_session(account.session_data)
+                    try:
+                        client = await self._create_client(session_str)
+                        await client.connect()
+                        await client.log_out()  # Явный выход из аккаунта
+                        app_logger.info(f"Выполнен выход из аккаунта {phone}")
+                    except Exception as e:
+                        app_logger.error(f"Ошибка выхода из аккаунта: {str(e)}")
+                    finally:
+                        if client and client.is_connected():
+                            await client.disconnect()
+
+                    # Удаляем запись из базы
                     await session.delete(account)
                     await session.commit()
                     app_logger.info(f"Аккаунт {phone} удален из базы")
                     return True
             except Exception as e:
                 app_logger.error(f"Ошибка удаления аккаунта: {str(e)}")
+
             return False
+
+    async def clear_session_cache(self):
+        now = datetime.now()
+        expired_sessions = [
+            session for session, data in self.active_sessions.items()
+            if (now - data['timestamp']).seconds > 1800
+        ]
+        for session in expired_sessions:
+            del self.active_sessions[session]
+        app_logger.info(f"Очищено {len(expired_sessions)} устаревших сессий")
+
 
 class UserActivityManager:
     def __init__(self):
@@ -252,7 +288,7 @@ class UserActivityManager:
             try:
                 await self._perform_activity(account, service)
                 interval = random.randint(CHECK_INTERVAL_MIN, CHECK_INTERVAL_MAX)
-                app_logger.debug(f"Следующая проверка для {account.phone} через {interval} сек")
+                app_logger.info(f"Следующая проверка для {account.phone} через {interval} сек")
                 await asyncio.sleep(interval)
             except asyncio.CancelledError:
                 app_logger.warning(f"Цикл активности для {account.phone} прерван")
@@ -281,9 +317,9 @@ class UserActivityManager:
             if session_str not in service.active_sessions:
                 app_logger.debug(f"Создаем новое подключение для {account.phone}")
                 client = await service._create_client(session_str)
-                service.active_sessions[session_str] = client
+                service.active_sessions[session_str] = {"client": client, "timestamp": datetime.now()}
             else:
-                client = service.active_sessions[session_str]
+                client = service.active_sessions[session_str]["client"]
 
             if not client.is_connected():
                 await client.connect()
@@ -304,13 +340,13 @@ class UserActivityManager:
         except Exception as e:
             app_logger.error(f"Ошибка активности для {account.phone}: {str(e)}")
             app_logger.debug(f"Трассировка:\n{traceback.format_exc()}")
-
-        finally:
-            if client and client.is_connected():
-                await client.disconnect()
             # Удаляем сессию из кэша при любой ошибке
             if session_str and session_str in service.active_sessions:
                 del service.active_sessions[session_str]
+        finally:
+            if client and client.is_connected():
+                await client.disconnect()
+
 
     async def _handle_invalid_session(self, service: AccountService, phone: str, session_str: str, user_id: int):
         """Обработка невалидной сессии"""

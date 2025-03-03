@@ -3,6 +3,7 @@ from loader import bot, dp, app_logger
 from services.services import service, activity_manager
 from database.models import Base, engine
 import handlers
+from utils.tasks import background_cleanup_task
 
 
 async def main():
@@ -19,6 +20,10 @@ async def main():
     for user_id in user_ids:
         await activity_manager.start_user_activity(user_id, service)
     app_logger.info(f"Запущены фоновые задачи для {len(user_ids)} аккаунтов...")
+
+    # Запуск фоновой задачи по очистке устаревших сессий
+    asyncio.create_task(background_cleanup_task(service))
+    app_logger.info(f"Запущена фоновая задача по очистке устаревших сессий")
 
     # Запуск бота
     await dp.start_polling(bot)
