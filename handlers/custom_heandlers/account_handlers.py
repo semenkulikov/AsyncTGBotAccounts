@@ -24,6 +24,7 @@ async def add_account_start(message: Message, state: FSMContext):
 
 @dp.message(AddAccountStates.wait_phone)
 async def process_phone(message: Message, state: FSMContext):
+    """ Хендлер для приема номера телефона """
     phone = message.text.strip()
     if not phone.startswith('+'):
         await message.answer("Неверный формат номера. Попробуйте снова")
@@ -66,6 +67,7 @@ async def process_phone(message: Message, state: FSMContext):
 
 @dp.message(AddAccountStates.wait_code)
 async def process_code(message: Message, state: FSMContext):
+    """ Хендлер для приема кода авторизации """
     data = await state.get_data()
     code = message.text.strip()
 
@@ -123,6 +125,7 @@ async def process_code(message: Message, state: FSMContext):
 
 @dp.message(AddAccountStates.wait_2fa)
 async def process_2fa(message: Message, state: FSMContext):
+    """ Хендлер для обработки 2FA авторизации """
     password = message.text.strip()
     data = await state.get_data()
 
