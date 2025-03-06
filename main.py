@@ -24,6 +24,7 @@ async def main():
 
     # Отправка уведомления администратору
     bot_data = await bot.get_me()
+    app_logger.info(f"Бот @{bot_data.username} запущен...")
     await bot.send_message(
         int(ADMIN_ID),
         f"Бот @{bot_data.username} запущен."
@@ -32,7 +33,6 @@ async def main():
 
     # Запуск бота
     await dp.start_polling(bot)
-    app_logger.info("Бот запущен...")
 
     # Очистка при завершении
     for task in activity_manager.user_tasks.values():
