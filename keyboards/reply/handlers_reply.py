@@ -3,6 +3,7 @@ from aiogram.utils.keyboard import ReplyKeyboardBuilder
 
 
 def handlers_reply() -> ReplyKeyboardMarkup:
+    """ Клавиатура для главного меню """
     kb = ReplyKeyboardBuilder()
     kb.button(text="Тестовая кнопка 1")
     kb.button(text="Тестовая 2")
