@@ -11,4 +11,11 @@ class AddAccountStates(StatesGroup):
     wait_2fa = State()
 
 class AccountStates(StatesGroup):
-    wait_toggle_phone = State()
+    waiting_for_phone = State()
+    waiting_for_code = State()
+    waiting_for_password = State()
+
+class ChannelStates(StatesGroup):
+    waiting_for_channel = State()
+    waiting_for_reaction = State()
+    waiting_for_interval = State()
