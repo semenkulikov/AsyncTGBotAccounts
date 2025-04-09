@@ -1,6 +1,7 @@
-from sqlalchemy import Column, Integer, String, LargeBinary, DateTime, Boolean, Text, ForeignKey
+from sqlalchemy import Column, Integer, String, LargeBinary, DateTime, Boolean, Text, ForeignKey, JSON
 from sqlalchemy.ext.asyncio import AsyncAttrs, create_async_engine, AsyncSession
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.orm import declarative_base, sessionmaker, relationship
+from datetime import datetime
 
 from config_data.config import DATABASE_URL
 
@@ -11,10 +12,13 @@ class User(Base):
     __tablename__ = 'users'
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(String, unique=True, nullable=False)  # Telegram ID
-    full_name = Column(String, nullable=False)
-    username = Column(String, nullable=False)
-    is_premium = Column(Boolean, nullable=True)
+    user_id = Column(Integer, unique=True)
+    username = Column(String)
+    first_name = Column(String)
+    last_name = Column(String)
+    is_admin = Column(Boolean, default=False)
+    accounts = relationship("Account", back_populates="user")
+    channels = relationship("UserChannel", back_populates="user")
 
 
 class Group(Base):
@@ -34,12 +38,42 @@ class Account(AsyncAttrs, Base):
     __tablename__ = 'accounts'
 
     id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey('users.id'))  # Связь с пользователем
-    phone = Column(String(20), unique=True)
-    session_data = Column(LargeBinary)
-    last_active = Column(DateTime)
-    two_factor = Column(String(50), nullable=True)
-    is_active = Column(Boolean, default=True)  # Для включения/выключения аккаунта
+    user_id = Column(Integer, ForeignKey('users.user_id'))
+    phone = Column(String)
+    session = Column(String)
+    password = Column(String)
+    is_active = Column(Boolean, default=True)
+    last_activity = Column(DateTime, default=datetime.utcnow)
+    user = relationship("User", back_populates="accounts")
+    reactions = relationship("AccountReaction", back_populates="account")
+
+
+class UserChannel(Base):
+    __tablename__ = 'user_channels'
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.user_id'))
+    channel_id = Column(Integer)
+    channel_username = Column(String)
+    channel_title = Column(String)
+    is_active = Column(Boolean, default=True)
+    last_checked = Column(DateTime, default=datetime.utcnow)
+    user = relationship("User", back_populates="channels")
+    reactions = relationship("AccountReaction", back_populates="channel")
+
+
+class AccountReaction(Base):
+    __tablename__ = 'account_reactions'
+
+    id = Column(Integer, primary_key=True)
+    account_id = Column(Integer, ForeignKey('accounts.id'))
+    channel_id = Column(Integer, ForeignKey('user_channels.id'))
+    post_id = Column(Integer)
+    reaction = Column(String)
+    reacted_at = Column(DateTime, default=datetime.utcnow)
+    account = relationship("Account", back_populates="reactions")
+    channel = relationship("UserChannel", back_populates="reactions")
+
 
 engine = create_async_engine(DATABASE_URL)
 async_session = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
