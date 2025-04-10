@@ -89,7 +89,6 @@ class AccountService:
                 select(Account).where(Account.user_id == user_id)
             )
             accounts = result.scalars().all()
-            app_logger.info(f"Найдено {len(accounts)} аккаунтов для пользователя {user.username}")
             return accounts
 
     async def toggle_account(self, user_id: int, phone: str) -> tuple[bool, bool]:
@@ -254,7 +253,6 @@ class UserActivityManager:
             self.account_tasks[phone] = asyncio.create_task(
                 self._account_activity_loop(account, service)
             )
-            app_logger.info(f"Запущена активность для аккаунта {phone}")
 
         # Остановка удаленных задач
         for phone in existing_phones - current_phones:
@@ -301,11 +299,22 @@ class UserActivityManager:
             # 3. Подключаемся и проверяем каналы
             await client.connect()
             
+            # Проверяем наличие сообщения в избранном
+            messages = await client.get_messages("me", limit=1)
+            current_time = datetime.now(UTC).strftime("%d.%m.%Y %H:%M:%S")
+            
+            if messages and messages[0].text and "Аккаунт был активен" in messages[0].text:
+                # Если сообщение уже есть - редактируем его
+                await client.edit_message("me", messages[0].id, f"🔄 Аккаунт был активен: {current_time}")
+            else:
+                # Если сообщения нет - создаем новое
+                await client.send_message("me", f"🔄 Аккаунт был активен: {current_time}")
+            
             # Получаем каналы пользователя
             async with async_session() as session:
                 channel_manager = ChannelManager(session)
                 channels = await channel_manager.get_user_channels(account.user_id)
-                
+                    
                 for channel in channels:
                     if not channel.is_active:
                         continue
@@ -330,14 +339,14 @@ class UserActivityManager:
                                 await asyncio.sleep(1)  # Задержка между реакциями
                                 
                         channel.last_checked = datetime.now(UTC)
+                        app_logger.info(f"Аккаунт {account.phone} проверил канал {channel.channel_title}")
                         await session.commit()
                         
                     except Exception as e:
                         app_logger.error(f"Ошибка при проверке канала {channel.channel_id}: {e}")
                         continue
-                        
+                    
             await service.update_last_active(account.phone)
-            app_logger.info(f"Активность обновлена для {account.phone}")
 
         except Exception as e:
             app_logger.error(f"Ошибка подключения: {str(e)}")
