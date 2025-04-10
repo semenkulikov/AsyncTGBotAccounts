@@ -12,9 +12,10 @@ async def bot_start(message: types.Message):
         if user is None:
             await create_user(
                 user_id=str(message.from_user.id),
-                full_name=message.from_user.full_name,
                 username=message.from_user.username,
-                is_premium=getattr(message.from_user, 'is_premium', None)
+                first_name=message.from_user.first_name,
+                last_name=message.from_user.last_name,
+                is_admin=int(message.from_user.id) in ALLOWED_USERS
             )
         commands = [f"/{cmd} - {desc}" for cmd, desc in DEFAULT_COMMANDS]
         if int(message.from_user.id) in ALLOWED_USERS:
@@ -50,8 +51,9 @@ async def bot_start(message: types.Message):
         if user is None:
             await create_user(
                 user_id=str(message.from_user.id),
-                full_name=message.from_user.full_name,
                 username=message.from_user.username,
-                is_premium=getattr(message.from_user, 'is_premium', None)
+                first_name=message.from_user.first_name,
+                last_name=message.from_user.last_name,
+                is_admin=int(message.from_user.id) in ALLOWED_USERS
             )
         app_logger.info(f"Новый пользователь: {message.from_user.full_name} — {message.from_user.username}")

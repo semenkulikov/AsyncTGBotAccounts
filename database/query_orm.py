@@ -8,9 +8,15 @@ async def get_user_by_user_id(user_id: str):
         result = await session.execute(select(User).where(User.user_id == user_id))
         return result.scalars().first()
 
-async def create_user(user_id: str, full_name: str, username: str, is_premium: bool = None):
+async def create_user(user_id: str, username: str, first_name: str, last_name: str, is_admin: bool = False):
     async with async_session() as session:
-        user = User(user_id=user_id, full_name=full_name, username=username, is_premium=is_premium)
+        user = User(
+            user_id=user_id,
+            username=username,
+            first_name=first_name,
+            last_name=last_name,
+            is_admin=is_admin
+        )
         session.add(user)
         await session.commit()
         return user
