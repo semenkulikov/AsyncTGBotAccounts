@@ -16,7 +16,6 @@ from database.query_orm import get_user_by_user_id
 from loader import app_logger, bot
 import traceback
 from services.channel_manager import ChannelManager
-from telethon.tl.functions.channels import ReadHistoryRequest
 
 
 class AccountService:
@@ -123,15 +122,24 @@ class AccountService:
                 return False, False, False
 
     async def update_last_active(self, phone: str):
+        """Обновляет время последней активности для аккаунта"""
         app_logger.debug(f"Обновление времени активности для {phone}")
         async with async_session() as session:
-            account = await session.execute(
-                select(Account).where(Account.phone == phone))
-            account = account.scalar()
-            if account:
-                account.last_active = datetime.now()
-                await session.commit()
-                app_logger.info(f"Обновлено время активности для {phone}")
+            try:
+                result = await session.execute(
+                    select(Account).where(Account.phone == phone)
+                )
+                account = result.scalar_one_or_none()
+                
+                if account:
+                    account.last_activity = datetime.now(UTC)
+                    await session.commit()
+                    app_logger.info(f"Обновлено время активности для {phone}")
+                else:
+                    app_logger.warning(f"Аккаунт {phone} не найден при обновлении времени активности")
+            except Exception as e:
+                app_logger.error(f"Ошибка при обновлении времени активности для {phone}: {e}")
+                await session.rollback()
 
     async def get_all_active_accounts(self) -> List[Account]:
         app_logger.debug("Получение всех активных аккаунтов")
@@ -299,15 +307,20 @@ class UserActivityManager:
             # 3. Подключаемся и проверяем каналы
             await client.connect()
             
-            # Проверяем наличие сообщения в избранном
+            # Читаем сообщения в избранном для обновления времени последнего захода
             messages = await client.get_messages("me", limit=1)
-            current_time = datetime.now(UTC).strftime("%d.%m.%Y %H:%M:%S")
+            if messages:
+                await client.send_read_acknowledge("me", messages[0])
             
+            # Отправляем тестовое сообщение и удаляем его для обновления времени последнего захода
+            temp_message = await client.send_message("me", "test")
+            await client.delete_messages("me", temp_message)
+            
+            # Обновляем сообщение в избранном
+            current_time = datetime.now(UTC).strftime("%d.%m.%Y %H:%M:%S")
             if messages and messages[0].text and "Аккаунт был активен" in messages[0].text:
-                # Если сообщение уже есть - редактируем его
                 await client.edit_message("me", messages[0].id, f"🔄 Аккаунт был активен: {current_time}")
             else:
-                # Если сообщения нет - создаем новое
                 await client.send_message("me", f"🔄 Аккаунт был активен: {current_time}")
             
             # Получаем каналы пользователя
@@ -344,7 +357,7 @@ class UserActivityManager:
 
         except Exception as e:
             app_logger.error(f"Ошибка подключения: {str(e)}")
-            await self._handle_invalid_session(service, account.phone, account.user_id)
+            app_logger.warning(f"Ошибка при обновлении активности для {account.phone}: {e}")
 
         finally:
             if client and client.is_connected():
