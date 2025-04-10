@@ -11,15 +11,27 @@ def get_channels_keyboard() -> InlineKeyboardMarkup:
         text="📋 Мои каналы",
         callback_data="my_channels"
     ))
-    builder.add(InlineKeyboardButton(
-        text="⚙️ Настройки реакций",
-        callback_data="reaction_settings"
-    ))
     builder.adjust(1)
     return builder.as_markup()
 
-def get_channel_actions_keyboard(channel_id: int) -> InlineKeyboardMarkup:
+def get_channel_actions_keyboard(channel_id: int, current_index: int, total_channels: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
+    
+    # Кнопки навигации
+    if total_channels > 1:
+        if current_index > 0:
+            builder.add(InlineKeyboardButton(
+                text="⬅️ Предыдущий",
+                callback_data=f"prev_channel_{channel_id}"
+            ))
+        if current_index < total_channels - 1:
+            builder.add(InlineKeyboardButton(
+                text="Следующий ➡️",
+                callback_data=f"next_channel_{channel_id}"
+            ))
+        builder.adjust(2)
+    
+    # Кнопки действий
     builder.add(InlineKeyboardButton(
         text="❌ Удалить",
         callback_data=f"delete_channel_{channel_id}"
@@ -29,8 +41,8 @@ def get_channel_actions_keyboard(channel_id: int) -> InlineKeyboardMarkup:
         callback_data=f"change_reaction_{channel_id}"
     ))
     builder.add(InlineKeyboardButton(
-        text="⏱ Изменить интервал",
-        callback_data=f"change_interval_{channel_id}"
+        text="⬅️ Назад",
+        callback_data="back_to_channels"
     ))
     builder.adjust(1)
     return builder.as_markup()

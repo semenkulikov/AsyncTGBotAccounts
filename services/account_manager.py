@@ -318,28 +318,22 @@ class UserActivityManager:
                 for channel in channels:
                     if not channel.is_active:
                         continue
-                        
                     try:
-                        # Получаем последние посты
-                        channel_entity = await client.get_entity(channel.channel_id)
-                        posts = await client(ReadHistoryRequest(
-                            peer=channel_entity,
-                            limit=10,
-                            offset_date=channel.last_checked
-                        ))
+                        # Получаем последнюю реакцию
+                        last_reaction = await channel_manager.get_last_reaction(channel.id)
+                        reaction = last_reaction.reaction if last_reaction else None
                         
-                        # Ставим реакции на новые посты
-                        for post in posts.messages:
-                            if post.date > channel.last_checked:
-                                await client.send_reaction(
-                                    entity=channel.channel_id,
-                                    message=post.id,
-                                    reaction=channel.reaction
-                                )
-                                await asyncio.sleep(1)  # Задержка между реакциями
-                                
+                        # Проверяем новые посты
+                        new_posts = await channel_manager.check_new_posts(channel, client)
+                        if new_posts and reaction:
+                            for post_id in new_posts:
+                                try:
+                                    await client.send_reaction(channel.channel_id, post_id, reaction)
+                                    await asyncio.sleep(random.uniform(1, 3))
+                                except Exception as e:
+                                    app_logger.error(f"Ошибка при отправке реакции: {e}")
+                                    
                         channel.last_checked = datetime.now(UTC)
-                        app_logger.info(f"Аккаунт {account.phone} проверил канал {channel.channel_title}")
                         await session.commit()
                         
                     except Exception as e:
