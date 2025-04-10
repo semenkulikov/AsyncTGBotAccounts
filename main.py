@@ -8,25 +8,6 @@ from services.channel_manager import ChannelManager
 from database.models import Base, engine, UserChannel, Account
 import handlers
 
-async def check_channels():
-    while True:
-        try:
-            async with engine.begin() as session:
-                channel_manager = ChannelManager(session)
-                channels = await channel_manager.get_user_channels()
-                
-                for channel in channels:
-                    if not channel.is_active:
-                        continue
-                        
-                    accounts = await service.get_user_accounts(channel.user_id)
-                    await channel_manager.process_channel_posts(channel, accounts)
-                    
-                    await asyncio.sleep(10)  # Задержка между проверками каналов
-                    
-        except Exception as e:
-            app_logger.error(f"Error in channel checking task: {e}")
-            await asyncio.sleep(60)  # Задержка при ошибке
 
 async def main():
     # Инициализация базы данных
@@ -41,10 +22,6 @@ async def main():
     for user_id in user_ids:
         await activity_manager.start_user_activity(user_id, service)
     app_logger.info(f"Запущены фоновые задачи для {len(user_ids)} аккаунтов...")
-
-    # Запуск задачи проверки каналов
-    asyncio.create_task(check_channels())
-    app_logger.info("Запущена задача проверки каналов...")
 
     # Отправка уведомления администратору
     bot_data = await bot.get_me()

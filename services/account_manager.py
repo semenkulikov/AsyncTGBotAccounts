@@ -3,7 +3,7 @@ from sqlalchemy import select, and_
 from cryptography.fernet import Fernet
 import asyncio
 import random
-from datetime import datetime
+from datetime import datetime, UTC
 from telethon import TelegramClient
 from telethon.errors import SessionExpiredError, SessionPasswordNeededError, AuthKeyError, FloodWaitError
 from telethon.sessions import StringSession
@@ -15,6 +15,8 @@ from telethon.network import ConnectionTcpAbridged
 from database.query_orm import get_user_by_user_id
 from loader import app_logger, bot
 import traceback
+from services.channel_manager import ChannelManager
+from telethon.tl.functions.channels import ReadHistoryRequest
 
 
 class AccountService:
@@ -59,7 +61,7 @@ class AccountService:
 
     async def create_account(self, user_id: int, phone: str, session_str: str, two_factor: str = None):
         user = await get_user_by_user_id(user_id)
-        app_logger.info(f"Создание аккаунта для пользователя {user.full_name}, телефон: {phone}")
+        app_logger.info(f"Создание аккаунта для пользователя {user.username}, телефон: {phone}")
         async with async_session() as session:
             try:
                 encrypted = await self.encrypt_session(session_str)
@@ -67,9 +69,9 @@ class AccountService:
                 account = Account(
                     user_id=user_id,
                     phone=phone,
-                    session_data=encrypted,
+                    session=encrypted,
                     is_active=True,
-                    two_factor=encrypted_2fa
+                    password=encrypted_2fa
                 )
                 session.add(account)
                 await session.commit()
@@ -81,18 +83,18 @@ class AccountService:
 
     async def get_user_accounts(self, user_id: int) -> List[Account]:
         user = await get_user_by_user_id(user_id)
-        app_logger.debug(f"Получение аккаунтов пользователя {user.full_name}")
+        app_logger.debug(f"Получение аккаунтов пользователя {user.username}")
         async with async_session() as session:
             result = await session.execute(
                 select(Account).where(Account.user_id == user_id)
             )
             accounts = result.scalars().all()
-            app_logger.info(f"Найдено {len(accounts)} аккаунтов для пользователя {user.full_name}")
+            app_logger.info(f"Найдено {len(accounts)} аккаунтов для пользователя {user.username}")
             return accounts
 
     async def toggle_account(self, user_id: int, phone: str) -> tuple[bool, bool]:
         user = await get_user_by_user_id(user_id)
-        app_logger.info(f"Изменение статуса аккаунта {phone} пользователя {user.full_name}")
+        app_logger.info(f"Изменение статуса аккаунта {phone} пользователя {user.username}")
         async with async_session() as session:
             try:
                 account = await session.execute(
@@ -149,7 +151,7 @@ class AccountService:
                 account = result.scalar()
                 if account:
                 # Получаем сессию для выхода из аккаунта
-                    session_str = await self.decrypt_session(account.session_data)
+                    session_str = await self.decrypt_session(account.session)
                     try:
                         client = await self._create_client(session_str)
                         await client.connect()
@@ -187,8 +189,8 @@ class AccountService:
                 select(Account).where(Account.phone == phone)
             )
             account = result.scalars().first()
-            if account and account.two_factor:
-                return self.cipher.decrypt(account.two_factor).decode()
+            if account and account.password:
+                return self.cipher.decrypt(account.password).decode()
             return None
 
 
@@ -205,7 +207,7 @@ class UserActivityManager:
                 self.user_tasks[user_id] = asyncio.create_task(
                     self._user_monitor_loop(user_id, service)
                 )
-                app_logger.info(f"Запущена проверка активности для пользователя {user.full_name}")
+                app_logger.info(f"Запущена проверка активности для пользователя {user.username}")
 
     async def stop_user_activity(self, user_id: int):
         user = await get_user_by_user_id(user_id)
@@ -214,7 +216,7 @@ class UserActivityManager:
             if task:
                 task.cancel()
                 del self.user_tasks[user_id]
-                app_logger.info(f"Остановлена проверка активности для пользователя {user.full_name}")
+                app_logger.info(f"Остановлена проверка активности для пользователя {user.username}")
 
     async def stop_account_activity(self, phone: str):
         async with self.lock:
@@ -234,9 +236,9 @@ class UserActivityManager:
                 accounts = await service.get_user_accounts(user_id)
                 await self._manage_account_tasks(accounts, service)
                 await asyncio.sleep(60)
-                app_logger.debug(f"Проверка состояния для пользователя {user.full_name}")
+                app_logger.debug(f"Проверка состояния для пользователя {user.username}")
             except asyncio.CancelledError:
-                app_logger.warning(f"Мониторинг активности для пользователя {user.full_name} прерван")
+                app_logger.warning(f"Мониторинг активности для пользователя {user.username} прерван")
                 break
             except Exception as e:
                 app_logger.error(f"Ошибка мониторинга: {str(e)}")
@@ -279,7 +281,7 @@ class UserActivityManager:
         client = None
         try:
             # 1. Дешифруем сессию
-            session_str = await service.decrypt_session(account.session_data)
+            session_str = await service.decrypt_session(account.session)
 
             # 2. Создаем новый клиент для каждого подключения
             client = TelegramClient(
@@ -296,10 +298,44 @@ class UserActivityManager:
                 auto_reconnect=False
             )
 
-            # 3. Подключаемся и выполняем минимальную активность
+            # 3. Подключаемся и проверяем каналы
             await client.connect()
-            await client.get_me()
-            await client.send_read_acknowledge("me")
+            
+            # Получаем каналы пользователя
+            async with async_session() as session:
+                channel_manager = ChannelManager(session)
+                channels = await channel_manager.get_user_channels(account.user_id)
+                
+                for channel in channels:
+                    if not channel.is_active:
+                        continue
+                        
+                    try:
+                        # Получаем последние посты
+                        channel_entity = await client.get_entity(channel.channel_id)
+                        posts = await client(ReadHistoryRequest(
+                            peer=channel_entity,
+                            limit=10,
+                            offset_date=channel.last_checked
+                        ))
+                        
+                        # Ставим реакции на новые посты
+                        for post in posts.messages:
+                            if post.date > channel.last_checked:
+                                await client.send_reaction(
+                                    entity=channel.channel_id,
+                                    message=post.id,
+                                    reaction=channel.reaction
+                                )
+                                await asyncio.sleep(1)  # Задержка между реакциями
+                                
+                        channel.last_checked = datetime.now(UTC)
+                        await session.commit()
+                        
+                    except Exception as e:
+                        app_logger.error(f"Ошибка при проверке канала {channel.channel_id}: {e}")
+                        continue
+                        
             await service.update_last_active(account.phone)
             app_logger.info(f"Активность обновлена для {account.phone}")
 
