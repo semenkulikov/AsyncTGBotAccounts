@@ -11,6 +11,8 @@ from config_data.config import CHECK_INTERVAL_MIN, CHECK_INTERVAL_MAX, API_ID, A
 from database.models import Account, User, async_session
 from telethon.tl.types import User as TelegramUser
 from telethon.network import ConnectionTcpAbridged
+from telethon.tl.functions.messages import SendReactionRequest
+from telethon.tl.types import ReactionEmoji
 
 from database.query_orm import get_user_by_user_id
 from loader import app_logger, bot
@@ -284,50 +286,46 @@ class UserActivityManager:
                 await asyncio.sleep(60)
 
     async def _perform_activity(self, account: Account, service: AccountService):
-        client = None
-        try:
-            # 1. Дешифруем сессию
-            session_str = await service.decrypt_session(account.session)
+        """Выполняет активность для аккаунта."""
+        session_str = await service.decrypt_session(account.session)
 
-            # 2. Создаем новый клиент для каждого подключения
-            client = TelegramClient(
-                session=StringSession(session_str),
-                api_id=API_ID,
-                api_hash=API_HASH,
-                connection=ConnectionTcpAbridged,
-                device_model="Samsung S24 Ultra",
-                app_version="10.2.0",
-                system_version="Android 14",
-                lang_code="en",
-                system_lang_code="en-US",
-                timeout=30,
-                auto_reconnect=False
-            )
-
-            # 3. Подключаемся и проверяем каналы
+        async with TelegramClient(
+            session=StringSession(session_str),
+            api_id=API_ID,
+            api_hash=API_HASH,
+            connection=ConnectionTcpAbridged,
+            device_model="Samsung S24 Ultra",
+            app_version="10.2.0",
+            system_version="Android 14",
+            lang_code="en",
+            system_lang_code="en-US",
+            timeout=30,
+            auto_reconnect=False
+        ) as client:
             await client.connect()
-            
+
             # Читаем сообщения в избранном для обновления времени последнего захода
             messages = await client.get_messages("me", limit=1)
             if messages:
                 await client.send_read_acknowledge("me", messages[0])
-            
+
             # Отправляем тестовое сообщение и удаляем его для обновления времени последнего захода
             temp_message = await client.send_message("me", "test")
             await client.delete_messages("me", temp_message)
-            
+
             # Обновляем сообщение в избранном
             current_time = datetime.now(UTC).strftime("%d.%m.%Y %H:%M:%S")
             if messages and messages[0].text and "Аккаунт был активен" in messages[0].text:
                 await client.edit_message("me", messages[0].id, f"🔄 Аккаунт был активен: {current_time}")
             else:
                 await client.send_message("me", f"🔄 Аккаунт был активен: {current_time}")
-            
+
             # Получаем каналы пользователя
             async with async_session() as session:
                 channel_manager = ChannelManager(session)
-                channels = await channel_manager.get_user_channels(account.user_id)
-                    
+                user = await get_user_by_user_id(str(account.user_id))
+                channels = await channel_manager.get_user_channels(user.id)
+
                 for channel in channels:
                     if not channel.is_active:
                         continue
@@ -335,34 +333,29 @@ class UserActivityManager:
                         # Получаем последнюю реакцию
                         last_reaction = await channel_manager.get_last_reaction(channel.id)
                         reaction = last_reaction.reaction if last_reaction else None
-                        
+
                         # Проверяем новые посты
                         new_posts = await channel_manager.check_new_posts(channel, client)
                         if new_posts and reaction:
                             for post_id in new_posts:
                                 try:
-                                    await client.send_reaction(channel.channel_id, post_id, reaction)
+                                    await client(SendReactionRequest(
+                                        peer=channel.channel_id,
+                                        msg_id=post_id,
+                                        reaction=[ReactionEmoji(emoticon=reaction)]
+                                    ))
                                     await asyncio.sleep(random.uniform(1, 3))
                                 except Exception as e:
                                     app_logger.error(f"Ошибка при отправке реакции: {e}")
-                                    
+
                         channel.last_checked = datetime.now(UTC)
                         await session.commit()
-                        
+
                     except Exception as e:
                         app_logger.error(f"Ошибка при проверке канала {channel.channel_id}: {e}")
                         continue
-                    
+
             await service.update_last_active(account.phone)
-
-        except Exception as e:
-            app_logger.error(f"Ошибка подключения: {str(e)}")
-            app_logger.warning(f"Ошибка при обновлении активности для {account.phone}: {e}")
-
-        finally:
-            if client and client.is_connected():
-                await client.disconnect()
-
 
     async def _handle_invalid_session(self, service: AccountService, phone: str, user_id: int):
         """Обработка невалидной сессии"""

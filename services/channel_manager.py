@@ -4,7 +4,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from database.models import UserChannel, AccountReaction
 from telethon import TelegramClient
-from telethon.tl.functions.channels import ReadHistoryRequest
+from telethon.tl.functions.messages import GetHistoryRequest
 from telethon.tl.types import InputPeerChannel
 from config_data.config import API_ID, API_HASH
 import asyncio
@@ -91,21 +91,22 @@ class ChannelManager:
             AccountReaction.channel_id == channel_id
         ).order_by(AccountReaction.reacted_at.desc())
         result = await self.session.execute(query)
-        return result.scalar_one_or_none()
+        return result.scalars().first()
 
     async def check_new_posts(self, channel: UserChannel, client: TelegramClient) -> list[int]:
         try:
-            channel_entity = await client.get_entity(channel.channel_id)
-            posts = await client(ReadHistoryRequest(
-                peer=channel_entity,
-                limit=10,
-                offset_date=channel.last_checked
-            ))
+            # Получаем последние сообщения из канала
+            messages = await client.get_messages(
+                channel.channel_id,
+                limit=10
+            )
             
             new_post_ids = []
-            for post in posts.messages:
-                if post.date > channel.last_checked:
-                    new_post_ids.append(post.id)
+            for message in messages:
+                # Добавляем часовой пояс UTC к message.date
+                message_date = message.date.replace(tzinfo=UTC)
+                if message_date > channel.last_checked.replace(tzinfo=UTC):
+                    new_post_ids.append(message.id)
             
             channel.last_checked = datetime.now(UTC)
             await self.session.commit()
