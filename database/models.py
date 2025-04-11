@@ -70,9 +70,11 @@ class AccountReaction(Base):
     channel_id = Column(Integer, ForeignKey('user_channels.id'))
     post_id = Column(Integer)
     reaction = Column(String)
+    available_reactions = Column(JSON, nullable=True)  # Список доступных реакций канала
+    user_reactions = Column(JSON, nullable=True)      # Пользовательский список реакций
     reacted_at = Column(DateTime, default=datetime.utcnow)
     account = relationship("Account", back_populates="reactions")
-    channel = relationship("UserChannel", back_populates="reactions")
+    channel = relationship("UserChannel", back_populates="reactions") 
 
 
 engine = create_async_engine(DATABASE_URL)

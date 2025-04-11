@@ -47,13 +47,39 @@ def get_channel_actions_keyboard(channel_id: int, current_index: int, total_chan
     builder.adjust(1)
     return builder.as_markup()
 
-def get_reactions_keyboard() -> InlineKeyboardMarkup:
-    reactions = ["👍", "❤️", "🔥", "🎉", "👏", "😮", "😢", "🤔"]
+def get_reactions_keyboard(reactions: list[tuple[str, str]], selected_reactions: list[str] = None) -> InlineKeyboardMarkup:
+    """Создает клавиатуру с доступными реакциями"""
+    if selected_reactions is None:
+        selected_reactions = []
+        
     builder = InlineKeyboardBuilder()
-    for reaction in reactions:
-        builder.add(InlineKeyboardButton(
-            text=reaction,
-            callback_data=f"set_reaction_{reaction}"
-        ))
-    builder.adjust(4)
+    
+    # Добавляем кнопки реакций
+    for emoji, callback_data in reactions:
+        # Если реакция уже выбрана, добавляем галочку
+        text = f"{'✅ ' if emoji in selected_reactions else ''}{emoji}"
+        builder.add(InlineKeyboardButton(text=text, callback_data=callback_data))
+    
+    # Добавляем кнопку "Использовать все"
+    builder.add(InlineKeyboardButton(
+        text="✅ Использовать все" if len(selected_reactions) == len(reactions) else "Использовать все",
+        callback_data="use_all_reactions"
+    ))
+    
+    # Добавляем кнопку "Завершить"
+    builder.add(InlineKeyboardButton(
+        text="💾 Завершить",
+        callback_data="finish_reactions"
+    ))
+    
+    # Добавляем кнопку "Назад"
+    builder.add(InlineKeyboardButton(
+        text="◀️ Назад",
+        callback_data="back_to_channels"
+    ))
+    
+    # Настраиваем расположение кнопок (5 в ряд для реакций, остальные по одной)
+    builder.adjust(5, 1, 1, 1)
+    
     return builder.as_markup() 
+

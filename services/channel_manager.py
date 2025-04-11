@@ -20,13 +20,7 @@ class ChannelManager:
         result = await self.session.execute(query)
         return result.scalars().all()
 
-    async def add_channel(
-        self,
-        user_id: int,
-        channel_id: int,
-        username: str,
-        title: str
-    ) -> bool:
+    async def add_channel(self, user_id: int, channel_id: int, username: str, title: str, available_reactions: list) -> int:
         """Добавляет новый канал для пользователя"""
         try:
             channel = UserChannel(
@@ -37,8 +31,17 @@ class ChannelManager:
                 is_active=True
             )
             self.session.add(channel)
+            await self.session.flush()
+            
+            # Создаем запись о реакциях
+            reaction = AccountReaction(
+                channel_id=channel.id,
+                available_reactions=available_reactions,
+                user_reactions=None  # Пользователь еще не выбрал свои реакции
+            )
+            self.session.add(reaction)
             await self.session.commit()
-            return True
+            return channel.id
         except Exception as e:
             await self.session.rollback()
             raise e
@@ -63,27 +66,32 @@ class ChannelManager:
             await self.session.rollback()
             raise e
 
-    async def update_channel_reaction(self, channel_id: int, reaction: str) -> bool:
-        """Обновляет реакцию для канала"""
+    async def update_channel_reaction(self, channel_id: int, user_reactions: list) -> bool:
+        """Обновляет пользовательские реакции для канала"""
         try:
-            # Создаем новую реакцию
-            new_reaction = AccountReaction(
-                channel_id=channel_id,
-                reaction=reaction,
-                reacted_at=datetime.now(UTC)
+            reaction = await self.session.execute(
+                select(AccountReaction).where(AccountReaction.channel_id == channel_id)
             )
-            self.session.add(new_reaction)
-            await self.session.commit()
-            return True
+            reaction = reaction.scalar_one_or_none()
+            
+            if reaction:
+                reaction.user_reactions = user_reactions
+                await self.session.commit()
+                return True
+            return False
         except Exception as e:
             await self.session.rollback()
             raise e
 
-    async def get_channel_reactions(self, channel_id: int) -> List[AccountReaction]:
-        """Получает все реакции для канала"""
-        query = select(AccountReaction).where(AccountReaction.channel_id == channel_id)
-        result = await self.session.execute(query)
-        return result.scalars().all()
+    async def get_channel_reactions(self, channel_id: int) -> tuple[list, list]:
+        """Получает списки доступных и пользовательских реакций"""
+        reaction = await self.session.execute(
+            select(AccountReaction).where(AccountReaction.channel_id == channel_id)
+        )
+        reaction = reaction.scalar_one_or_none()
+        if reaction:
+            return reaction.available_reactions, reaction.user_reactions
+        return [], None 
 
     async def get_last_reaction(self, channel_id: int) -> Optional[AccountReaction]:
         """Получает последнюю реакцию для канала"""
