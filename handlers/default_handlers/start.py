@@ -1,4 +1,5 @@
 from aiogram import types
+from keyboards.reply.handlers_reply import handlers_reply
 from loader import bot, dp, app_logger
 from config_data.config import ALLOWED_USERS, DEFAULT_COMMANDS, ADMIN_COMMANDS
 from database.query_orm import get_user_by_user_id, create_user, get_group_by_group_id, create_group
@@ -22,13 +23,15 @@ async def bot_start(message: types.Message):
             commands.extend([f"/{cmd} - {desc}" for cmd, desc in ADMIN_COMMANDS])
             await message.answer(
                 f"Здравствуйте, {message.from_user.full_name}! Вы в списке администраторов бота. \n"
-                f"Вам доступны следующие команды:\n" + "\n".join(commands)
+                f"Вам доступны следующие команды:\n" + "\n".join(commands),
+                reply_markup=handlers_reply()
             )
         else:
             app_logger.info(f"Новый пользователь: {message.from_user.full_name} — {message.from_user.username}")
             await message.answer(
                 f"Здравствуйте, {message.from_user.full_name}! Я — телеграм-бот. \n"
-                f"Вам доступны следующие команды:\n" + "\n".join(commands)
+                f"Вам доступны следующие команды:\n" + "\n".join(commands),
+                reply_markup=handlers_reply()
             )
     else:
         await message.answer(

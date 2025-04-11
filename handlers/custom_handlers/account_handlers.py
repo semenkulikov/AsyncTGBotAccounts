@@ -29,6 +29,7 @@ async def process_phone(message: Message, state: FSMContext):
     if not phone.startswith('+'):
         await message.answer("Неверный формат номера. Попробуйте снова")
         await state.clear()
+        return
 
     # Явно создаем новую строковую сессию
     session = StringSession()

@@ -13,7 +13,7 @@ DEFAULT_COMMANDS = (
     ("add_account", "Добавить аккаунт"),
     ('my_accounts', "Мои аккаунты"),
     ('my_channels', "Мои каналы"),
-    ('toggle_account', "Изменить статус аккаунты (Вкл\Выкл)")
+    ('toggle_account', "Изменить статус аккаунта (Вкл\Выкл)")
 )
 ADMIN_COMMANDS = (
     ("admin_panel", "Админка"),
