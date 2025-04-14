@@ -20,7 +20,10 @@ async def main():
     user_ids = {acc.user_id for acc in accounts}
 
     for user_id in user_ids:
-        await activity_manager.start_user_activity(user_id, service)
+        try:
+            await activity_manager.start_user_activity(user_id, service)
+        except Exception:
+            app_logger.info(f"Пользователь с ID: {user_id} не найден!")
     app_logger.info(f"Запущены фоновые задачи для {len(user_ids)} пользователей...")
 
     # Отправка уведомления администратору
