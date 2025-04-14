@@ -97,10 +97,16 @@ class ChannelManager:
 
     async def get_channel_reactions(self, channel_id: int) -> tuple[list, list]:
         """Получает списки доступных и пользовательских реакций"""
-        reaction = await self.session.execute(
-            select(AccountReaction).where(AccountReaction.channel_id == channel_id)
-        )
-        reaction = reaction.scalar_one_or_none()
+        try:
+            reaction = await self.session.execute(
+                select(AccountReaction).where(AccountReaction.channel_id == channel_id)
+            )
+            reaction = reaction.scalar_one_or_none()
+        except Exception:
+            reaction = await self.session.execute(
+                select(AccountReaction).where(AccountReaction.channel_id == channel_id)
+            )
+            reaction = reaction.scalars().first()
         if reaction:
             return reaction.available_reactions, reaction.user_reactions
         return [], None

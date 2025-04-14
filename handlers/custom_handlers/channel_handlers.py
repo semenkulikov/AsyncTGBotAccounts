@@ -3,10 +3,10 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
 from aiogram.exceptions import TelegramBadRequest
-from config_data.config import API_HASH, API_ID, ENCRYPTION_KEY
-from sqlalchemy.ext.asyncio import AsyncSession
+from config_data.config import API_HASH, API_ID
 from telethon.tl.functions.channels import GetFullChannelRequest
-from telethon.tl.types import ReactionEmoji, ReactionCustomEmoji
+from telethon.tl.types import ReactionEmoji, ChatInviteAlready
+from telethon.tl.functions.messages import ImportChatInviteRequest, CheckChatInviteRequest
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.network import ConnectionTcpAbridged
@@ -136,7 +136,7 @@ async def process_channel(message: types.Message, state: FSMContext):
             # Получаем активные аккаунты пользователя
             accounts = await service.get_user_accounts(message.from_user.id)
             channels = await channel_manager.get_user_channels(user.id)
-            user_channels = [channel.channel_username
+            user_channels = [channel.channel_title
                              for channel in channels]
             
             if not accounts:
@@ -154,11 +154,6 @@ async def process_channel(message: types.Message, state: FSMContext):
                 channel_username = channel_link[1:]
             else:
                 channel_username = channel_link.split('/')[-1]
-
-            # Обработка ситуации уже добавленного канала
-            if channel_username in user_channels:
-                await message.answer("Такой канал уже добавлен!")
-                return
 
             # Получаем информацию о канале через Telethon используя аккаунт пользователя
             try:
@@ -186,8 +181,27 @@ async def process_channel(message: types.Message, state: FSMContext):
                 await client.connect()
                 
                 try:
-                    channel = await client.get_entity(channel_username)
-                    full_channel = await client(GetFullChannelRequest(channel))
+                    # Обработка открытых и закрытых каналов
+                    if "+" in channel_username:
+                        invite = await client(CheckChatInviteRequest(channel_username[1:]))
+
+                        if isinstance(invite, ChatInviteAlready):
+                            # Аккаунт уже в канале, получаем полные данные
+                            channel = await client.get_entity(invite.chat.id)
+                            full_channel = await client(GetFullChannelRequest(channel))
+                        else:
+                            # Аккаунт не присоединен к каналу
+                            await message.answer("Аккаунт не присоединен к закрытому каналу!")
+                            return
+                    else:
+                        channel = await client.get_entity(channel_username)
+                        full_channel = await client(GetFullChannelRequest(channel))
+
+                    # Обработка ситуации уже добавленного канала
+                    if channel.title in user_channels:
+                        await message.answer("Такой канал уже добавлен!")
+                        return
+
                     available_reactions = []
                     
                     if hasattr(full_channel.full_chat.available_reactions, 'reactions'):
@@ -198,9 +212,10 @@ async def process_channel(message: types.Message, state: FSMContext):
                             for r in reactions:
                                 if isinstance(r, ReactionEmoji):
                                     available_reactions.append(str(r.emoticon))
-                        else:
-                            default_reactions = ["👍", "❤️", "🔥", "🎉", "👏", "😮", "😢", "🤔"]
-                            available_reactions = default_reactions
+                    else:
+                        default_reactions = ["👍", "❤", "👏", "🎉", "🤩", "👌", "😍",
+                                             "❤", "💯", "🤣", "⚡", "🏆", "🤝", "✍"]
+                        available_reactions = default_reactions
                 finally:
                     await client.disconnect()
                     loop.close()
