@@ -37,7 +37,7 @@ def get_channel_actions_keyboard(channel_id: int, current_index: int, total_chan
         callback_data=f"delete_channel_{channel_id}"
     ))
     builder.add(InlineKeyboardButton(
-        text="🔄 Изменить реакцию",
+        text="🔄 Изменить реакции",
         callback_data=f"change_reaction_{channel_id}"
     ))
     builder.add(InlineKeyboardButton(
@@ -49,8 +49,7 @@ def get_channel_actions_keyboard(channel_id: int, current_index: int, total_chan
 
 def get_reactions_keyboard(reactions: list[tuple[str, str]], selected_reactions: list[str] = None) -> InlineKeyboardMarkup:
     """Создает клавиатуру с доступными реакциями"""
-    if selected_reactions is None:
-        selected_reactions = []
+    selected_reactions = selected_reactions or []
         
     builder = InlineKeyboardBuilder()
     
@@ -59,27 +58,27 @@ def get_reactions_keyboard(reactions: list[tuple[str, str]], selected_reactions:
         # Если реакция уже выбрана, добавляем галочку
         text = f"{'✅ ' if emoji in selected_reactions else ''}{emoji}"
         builder.add(InlineKeyboardButton(text=text, callback_data=callback_data))
+
+    builder.adjust(5, repeat=True)
     
     # Добавляем кнопку "Использовать все"
-    builder.add(InlineKeyboardButton(
-        text="✅ Использовать все" if len(selected_reactions) == len(reactions) else "Использовать все",
-        callback_data="use_all_reactions"
-    ))
+    builder.row(
+        InlineKeyboardButton(
+            text="◀️ Назад",
+            callback_data="back_to_channels"
+        ),
+        InlineKeyboardButton(
+            text="✅ Использовать все" if len(selected_reactions) == len(reactions) else "Использовать все",
+            callback_data="use_all_reactions"
+        ),
+        width=2
+    )
     
     # Добавляем кнопку "Завершить"
-    builder.add(InlineKeyboardButton(
+    builder.row(InlineKeyboardButton(
         text="💾 Завершить",
         callback_data="finish_reactions"
     ))
-    
-    # Добавляем кнопку "Назад"
-    builder.add(InlineKeyboardButton(
-        text="◀️ Назад",
-        callback_data="back_to_channels"
-    ))
-    
-    # Настраиваем расположение кнопок (5 в ряд для реакций, остальные по одной)
-    builder.adjust(5, 1, 1, 1)
     
     return builder.as_markup() 
 

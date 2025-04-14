@@ -1,3 +1,4 @@
+import random
 from datetime import datetime, timedelta, UTC
 from typing import List, Optional
 from sqlalchemy import select, update
@@ -45,6 +46,16 @@ class ChannelManager:
         except Exception as e:
             await self.session.rollback()
             raise e
+
+    async def get_channel(self, channel_id: int) -> Optional[UserChannel]:
+        """ Метод для получения канала по его id """
+        query = select(UserChannel).where(UserChannel.id == channel_id)
+        result = await self.session.execute(query)
+        channel = result.scalar_one_or_none()
+
+        if channel:
+            return channel
+        return None
 
     async def delete_channel(self, channel_id: int) -> bool:
         """Удаляет канал"""
@@ -149,11 +160,12 @@ class ChannelManager:
                 new_posts = await self.check_new_posts(channel, client)
                 
                 for post_id in new_posts:
+                    cur_reaction = random.choice(channel.reactions)
                     success = await self.set_reaction(
                         client,
                         channel.channel_id,
                         post_id,
-                        channel.reaction
+                        cur_reaction
                     )
                     
                     if success:
@@ -161,7 +173,7 @@ class ChannelManager:
                             account_id=account.id,
                             channel_id=channel.id,
                             post_id=post_id,
-                            reaction=channel.reaction
+                            reaction=cur_reaction
                         )
                         self.session.add(reaction)
                         await self.session.commit()

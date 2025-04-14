@@ -6,7 +6,7 @@ from aiogram.exceptions import TelegramBadRequest
 from config_data.config import API_HASH, API_ID, ENCRYPTION_KEY
 from sqlalchemy.ext.asyncio import AsyncSession
 from telethon.tl.functions.channels import GetFullChannelRequest
-from telethon.tl.types import ReactionEmoji
+from telethon.tl.types import ReactionEmoji, ReactionCustomEmoji
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.network import ConnectionTcpAbridged
@@ -51,7 +51,6 @@ async def my_channels_callback(callback: CallbackQuery):
                 )
                 return
 
-            # Сохраняем индекс текущего канала в состоянии
             await callback.message.edit_text(
                 await _get_channel_text(channels[0], channel_manager),
                 reply_markup=get_channel_actions_keyboard(channels[0].id, 0, len(channels))
@@ -101,8 +100,12 @@ async def _get_channel_text(channel: UserChannel, channel_manager: ChannelManage
     text += f"Статус: {'активен' if channel.is_active else 'неактивен'}\n"
     
     # Получаем текущие реакции
-    reactions = channel.reactions or []
-    reactions_text = " ".join(reactions) if reactions else "не выбраны"
+    try:
+        available_reactions, user_reactions = await channel_manager.get_channel_reactions(channel.id)
+    except TelegramBadRequest:
+        available_reactions, user_reactions = [], []
+    user_reactions = available_reactions if user_reactions is None else user_reactions
+    reactions_text = " ".join(user_reactions) if user_reactions else "не выбраны"
     text += f"Реакции: {reactions_text}\n"
         
     return text
@@ -131,8 +134,10 @@ async def process_channel(message: types.Message, state: FSMContext):
             user = await get_user_by_user_id(str(message.from_user.id))
             
             # Получаем активные аккаунты пользователя
-            service = AccountService(ENCRYPTION_KEY)
             accounts = await service.get_user_accounts(message.from_user.id)
+            channels = await channel_manager.get_user_channels(user.id)
+            user_channels = [channel.channel_username
+                             for channel in channels]
             
             if not accounts:
                 await message.answer(
@@ -149,6 +154,11 @@ async def process_channel(message: types.Message, state: FSMContext):
                 channel_username = channel_link[1:]
             else:
                 channel_username = channel_link.split('/')[-1]
+
+            # Обработка ситуации уже добавленного канала
+            if channel_username in user_channels:
+                await message.answer("Такой канал уже добавлен!")
+                return
 
             # Получаем информацию о канале через Telethon используя аккаунт пользователя
             try:
@@ -186,10 +196,8 @@ async def process_channel(message: types.Message, state: FSMContext):
                             # Преобразуем ReactionEmoji в строки
                             available_reactions = []
                             for r in reactions:
-                                if hasattr(r, 'emoticon'):
+                                if isinstance(r, ReactionEmoji):
                                     available_reactions.append(str(r.emoticon))
-                                else:
-                                    available_reactions.append(str(r))
                         else:
                             default_reactions = ["👍", "❤️", "🔥", "🎉", "👏", "😮", "😢", "🤔"]
                             available_reactions = default_reactions
@@ -270,34 +278,40 @@ async def change_reaction_callback(callback: CallbackQuery, state: FSMContext):
     """Начинает процесс изменения реакции"""
     try:
         channel_id = int(callback.data.split("_")[-1])
-        
+
         async with async_session() as session:
             channel_manager = ChannelManager(session)
             channel = await channel_manager.get_channel(channel_id)
-            
+
             if not channel:
                 await callback.answer("Канал не найден")
                 return
-                
+
+            # Получаем текущие реакции
+            try:
+                available_reactions, user_reactions = await channel_manager.get_channel_reactions(channel.id)
+            except TelegramBadRequest:
+                available_reactions, user_reactions = [], []
+
             # Сохраняем данные в состоянии
             await state.update_data(
                 channel_id=channel_id,
-                selected_reactions=channel.reactions or [],
-                available_reactions=channel.available_reactions
+                selected_reactions=user_reactions or [],
+                available_reactions=available_reactions
             )
-            
+
             # Формируем текст с текущими реакциями
-            reactions_text = " ".join(channel.reactions) if channel.reactions else "не выбраны"
-            
+            reactions_text = " ".join(user_reactions) if user_reactions else "не выбраны"
+
             await callback.message.edit_text(
-                f"Выберите реакции для канала {channel.title}\n"
+                f"Выберите реакции для канала {channel.channel_title}\n"
                 f"Текущие реакции: {reactions_text}",
                 reply_markup=get_reactions_keyboard(
-                    [(r, f"reaction_{hash(r)}") for r in channel.available_reactions],
-                    channel.reactions or []
+                    [(r, f"reaction_{hash(r)}") for r in available_reactions],
+                    user_reactions or []
                 )
             )
-            
+
     except Exception as e:
         app_logger.error(f"Ошибка при изменении реакции: {e}")
         await callback.answer("Произошла ошибка. Попробуйте позже")
@@ -336,7 +350,7 @@ async def process_reaction(callback: CallbackQuery, state: FSMContext):
                 
                 if success:
                     await callback.message.edit_text(
-                        f"Реакции для канала {channel.title} успешно обновлены",
+                        f"Реакции для канала {channel.channel_title} успешно обновлены",
                         reply_markup=get_channels_keyboard()
                     )
                 else:
@@ -379,7 +393,7 @@ async def process_reaction(callback: CallbackQuery, state: FSMContext):
             
             # Обновляем сообщение
             await callback.message.edit_text(
-                f"Выберите реакции для канала {channel.title}\n"
+                f"Выберите реакции для канала {channel.channel_title}\n"
                 f"Текущие реакции: {reactions_text}",
                 reply_markup=get_reactions_keyboard(
                     [(r, f"reaction_{hash(r)}") for r in available_reactions],
