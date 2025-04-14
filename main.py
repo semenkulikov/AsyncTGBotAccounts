@@ -21,7 +21,7 @@ async def main():
 
     for user_id in user_ids:
         await activity_manager.start_user_activity(user_id, service)
-    app_logger.info(f"Запущены фоновые задачи для {len(user_ids)} аккаунтов...")
+    app_logger.info(f"Запущены фоновые задачи для {len(user_ids)} пользователей...")
 
     # Отправка уведомления администратору
     bot_data = await bot.get_me()

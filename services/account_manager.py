@@ -13,10 +13,10 @@ from telethon.tl.types import User as TelegramUser
 from telethon.network import ConnectionTcpAbridged
 from telethon.tl.functions.messages import SendReactionRequest
 from telethon.tl.types import ReactionEmoji
+from telethon import functions
 
 from database.query_orm import get_user_by_user_id
 from loader import app_logger, bot
-import traceback
 from services.channel_manager import ChannelManager
 
 
@@ -242,10 +242,11 @@ class UserActivityManager:
 
         while True:
             try:
+                app_logger.debug(f"Проверка состояния аккаунтов для пользователя {user.username}")
                 accounts = await service.get_user_accounts(user_id)
                 await self._manage_account_tasks(accounts, service)
                 await asyncio.sleep(60)
-                app_logger.debug(f"Проверка состояния для пользователя {user.username}")
+                
             except asyncio.CancelledError:
                 app_logger.warning(f"Мониторинг активности для пользователя {user.username} прерван")
                 break
@@ -254,21 +255,25 @@ class UserActivityManager:
                 await asyncio.sleep(60)
 
     async def _manage_account_tasks(self, accounts: List[Account], service: AccountService):
+        """Управление задачами для аккаунтов"""
         current_phones = {acc.phone for acc in accounts if acc.is_active}
         existing_phones = set(self.account_tasks.keys())
 
         # Запуск новых задач
         for phone in current_phones - existing_phones:
             account = next(acc for acc in accounts if acc.phone == phone)
-            self.account_tasks[phone] = asyncio.create_task(
-                self._account_activity_loop(account, service)
-            )
+            if phone not in self.account_tasks or self.account_tasks[phone].done():
+                self.account_tasks[phone] = asyncio.create_task(
+                    self._account_activity_loop(account, service)
+                )
+                app_logger.info(f"Запущена задача для аккаунта {phone}")
 
         # Остановка удаленных задач
         for phone in existing_phones - current_phones:
-            self.account_tasks[phone].cancel()
-            del self.account_tasks[phone]
-            app_logger.info(f"Остановлена активность для аккаунта {phone}")
+            if phone in self.account_tasks and not self.account_tasks[phone].done():
+                self.account_tasks[phone].cancel()
+                del self.account_tasks[phone]
+                app_logger.info(f"Остановлена задача для аккаунта {phone}")
 
     async def _account_activity_loop(self, account: Account, service: AccountService):
         app_logger.info(f"Запуск цикла активности для {account.phone}")
@@ -304,21 +309,25 @@ class UserActivityManager:
         ) as client:
             await client.connect()
 
-            # Читаем сообщения в избранном для обновления времени последнего захода
-            messages = await client.get_messages("me", limit=1)
-            if messages:
-                await client.send_read_acknowledge("me", messages[0])
+            await client(functions.account.UpdateStatusRequest(
+                        offline=True
+                    ))
 
-            # Отправляем тестовое сообщение и удаляем его для обновления времени последнего захода
-            temp_message = await client.send_message("me", "test")
-            await client.delete_messages("me", temp_message)
+            # # Читаем сообщения в избранном для обновления времени последнего захода
+            # messages = await client.get_messages("me", limit=1)
+            # if messages:
+            #     await client.send_read_acknowledge("me", messages[0])
 
-            # Обновляем сообщение в избранном
-            current_time = datetime.now(UTC).strftime("%d.%m.%Y %H:%M:%S")
-            if messages and messages[0].text and "Аккаунт был активен" in messages[0].text:
-                await client.edit_message("me", messages[0].id, f"🔄 Аккаунт был активен: {current_time}")
-            else:
-                await client.send_message("me", f"🔄 Аккаунт был активен: {current_time}")
+            # # Отправляем тестовое сообщение и удаляем его для обновления времени последнего захода
+            # temp_message = await client.send_message("me", "test")
+            # await client.delete_messages("me", temp_message)
+
+            # # Обновляем сообщение в избранном
+            # current_time = datetime.now(UTC).strftime("%d.%m.%Y %H:%M:%S")
+            # if messages and messages[0].text and "Аккаунт был активен" in messages[0].text:
+            #     await client.edit_message("me", messages[0].id, f"🔄 Аккаунт был активен: {current_time}")
+            # else:
+            #     await client.send_message("me", f"🔄 Аккаунт был активен: {current_time}")
 
             # Получаем каналы пользователя
             async with async_session() as session:
@@ -356,6 +365,11 @@ class UserActivityManager:
                         continue
 
             await service.update_last_active(account.phone)
+            
+            await client(functions.account.UpdateStatusRequest(
+                        offline=False
+                    ))
+            await client.disconnect()
 
     async def _handle_invalid_session(self, service: AccountService, phone: str, user_id: int):
         """Обработка невалидной сессии"""
