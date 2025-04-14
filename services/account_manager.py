@@ -310,24 +310,24 @@ class UserActivityManager:
             await client.connect()
 
             await client(functions.account.UpdateStatusRequest(
-                        offline=True
+                        offline=False
                     ))
 
-            # # Читаем сообщения в избранном для обновления времени последнего захода
-            # messages = await client.get_messages("me", limit=1)
-            # if messages:
-            #     await client.send_read_acknowledge("me", messages[0])
+            # Читаем сообщения в избранном для обновления времени последнего захода
+            messages = await client.get_messages("me", limit=1)
+            if messages:
+                await client.send_read_acknowledge("me", messages[0])
 
             # # Отправляем тестовое сообщение и удаляем его для обновления времени последнего захода
             # temp_message = await client.send_message("me", "test")
             # await client.delete_messages("me", temp_message)
 
-            # # Обновляем сообщение в избранном
-            # current_time = datetime.now(UTC).strftime("%d.%m.%Y %H:%M:%S")
-            # if messages and messages[0].text and "Аккаунт был активен" in messages[0].text:
-            #     await client.edit_message("me", messages[0].id, f"🔄 Аккаунт был активен: {current_time}")
-            # else:
-            #     await client.send_message("me", f"🔄 Аккаунт был активен: {current_time}")
+            # Обновляем сообщение в избранном
+            current_time = datetime.now(UTC).strftime("%d.%m.%Y %H:%M:%S")
+            if messages and messages[0].text and "Аккаунт был активен" in messages[0].text:
+                await client.edit_message("me", messages[0].id, f"🔄 Аккаунт был активен: {current_time}")
+            else:
+                await client.send_message("me", f"🔄 Аккаунт был активен: {current_time}")
 
             # Получаем каналы пользователя
             async with async_session() as session:
@@ -367,7 +367,7 @@ class UserActivityManager:
             await service.update_last_active(account.phone)
             
             await client(functions.account.UpdateStatusRequest(
-                        offline=False
+                        offline=True
                     ))
             await client.disconnect()
 
