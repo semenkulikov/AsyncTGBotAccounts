@@ -339,19 +339,24 @@ class UserActivityManager:
                     if not channel.is_active:
                         continue
                     try:
-                        # Получаем последнюю реакцию
-                        last_reaction = await channel_manager.get_last_reaction(channel.id)
-                        reaction = last_reaction.reaction if last_reaction else None
+                        # Получаем список доступных реакций и для каждого поста выбираем рандомную
+                        try:
+                            available_reactions, user_reactions = await channel_manager.get_channel_reactions(
+                                channel.id
+                            )
+                        except Exception:
+                            available_reactions, user_reactions = [], []
+                        user_reactions = available_reactions if user_reactions is None else user_reactions
 
                         # Проверяем новые посты
                         new_posts = await channel_manager.check_new_posts(channel, client)
-                        if new_posts and reaction:
+                        if new_posts and user_reactions:
                             for post_id in new_posts:
                                 try:
                                     await client(SendReactionRequest(
                                         peer=channel.channel_id,
                                         msg_id=post_id,
-                                        reaction=[ReactionEmoji(emoticon=reaction)]
+                                        reaction=[ReactionEmoji(emoticon=random.choice(user_reactions))]
                                     ))
                                     await asyncio.sleep(random.uniform(1, 3))
                                 except Exception as e:

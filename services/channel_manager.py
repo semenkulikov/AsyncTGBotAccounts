@@ -24,6 +24,7 @@ class ChannelManager:
     async def add_channel(self, user_id: int, channel_id: int, username: str, title: str, available_reactions: list) -> int:
         """Добавляет новый канал для пользователя"""
         try:
+            channel_id = int("-100" + str(channel_id))  # Приводим ID канала к стандартному виду
             channel = UserChannel(
                 user_id=user_id,
                 channel_id=channel_id,
@@ -102,15 +103,7 @@ class ChannelManager:
         reaction = reaction.scalar_one_or_none()
         if reaction:
             return reaction.available_reactions, reaction.user_reactions
-        return [], None 
-
-    async def get_last_reaction(self, channel_id: int) -> Optional[AccountReaction]:
-        """Получает последнюю реакцию для канала"""
-        query = select(AccountReaction).where(
-            AccountReaction.channel_id == channel_id
-        ).order_by(AccountReaction.reacted_at.desc())
-        result = await self.session.execute(query)
-        return result.scalars().first()
+        return [], None
 
     async def check_new_posts(self, channel: UserChannel, client: TelegramClient) -> list[int]:
         try:
