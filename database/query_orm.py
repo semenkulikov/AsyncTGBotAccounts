@@ -4,11 +4,13 @@ from database.models import async_session
 
 
 async def get_user_by_user_id(user_id: str):
+    """ Функция для получения юзера по его Telegram ID """
     async with async_session() as session:
         result = await session.execute(select(User).where(User.user_id == user_id))
         return result.scalars().first()
 
 async def create_user(user_id: str, username: str, first_name: str, last_name: str, is_admin: bool = False):
+    """ Функция для создания объекта User """
     async with async_session() as session:
         user = User(
             user_id=user_id,
@@ -22,6 +24,7 @@ async def create_user(user_id: str, username: str, first_name: str, last_name: s
         return user
 
 async def get_group_by_group_id(group_id: str):
+    """ Функция для получения группы по ее ID """
     async with async_session() as session:
         result = await session.execute(select(Group).where(Group.group_id == group_id))
         return result.scalars().first()
