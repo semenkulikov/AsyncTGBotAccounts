@@ -31,6 +31,7 @@ async def get_group_by_group_id(group_id: str):
 
 async def create_group(group_id: str, title: str, description: str = None, bio: str = None,
                        invite_link: str = None, location: str = None, username: str = None):
+    """ Функция для создания объекта Группы """
     async with async_session() as session:
         group = Group(
             group_id=group_id,
@@ -46,11 +47,13 @@ async def create_group(group_id: str, title: str, description: str = None, bio: 
         return group
 
 async def get_all_users():
+    """ Функция для получения всех юзеров """
     async with async_session() as session:
         result = await session.execute(select(User))
         return result.scalars().all()
 
 async def update_user_invoice(user_id: str, invoice_path: str):
+    """ Функция для обновления пути """
     async with async_session() as session:
         result = await session.execute(select(User).where(User.user_id == user_id))
         user = result.scalars().first()
