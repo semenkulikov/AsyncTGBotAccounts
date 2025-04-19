@@ -10,6 +10,7 @@ import handlers
 
 
 async def main():
+    """ Функция - точка входа """
     # Инициализация базы данных
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
