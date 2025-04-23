@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 
 class DataBaseSession(BaseMiddleware):
+    """ Middleware для передачи в хендлеры объект сессии """
     def __init__(self, session_pool: async_sessionmaker):
         self.session_pool = session_pool
 
