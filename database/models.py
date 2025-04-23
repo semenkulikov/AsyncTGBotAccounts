@@ -9,6 +9,7 @@ Base = declarative_base()
 
 
 class User(Base):
+    """ Модель для юзера """
     __tablename__ = 'users'
 
     id = Column(Integer, primary_key=True, index=True)
@@ -22,6 +23,7 @@ class User(Base):
 
 
 class Group(Base):
+    """ Модель для групп """
     __tablename__ = 'groups'
 
     id = Column(Integer, primary_key=True, index=True)
