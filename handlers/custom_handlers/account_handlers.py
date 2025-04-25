@@ -8,7 +8,7 @@ from telethon import TelegramClient
 from telethon import types as tg_types
 from telethon.errors import SessionPasswordNeededError, FloodWaitError
 from telethon.sessions import StringSession
-from services.services import activity_manager
+from services.services import activity_manager, service
 from config_data.config import ENCRYPTION_KEY, API_ID, API_HASH
 from loader import dp, app_logger
 from services.account_manager import AccountService
@@ -225,7 +225,6 @@ async def toggle_account_start(message: Message, state: FSMContext):
 
 @dp.message(AccountStates.wait_toggle_phone)
 async def process_toggle(message: Message, state: FSMContext):
-    service = AccountService(ENCRYPTION_KEY)
     success, old_status, new_status = await service.toggle_account(message.from_user.id, message.text)
 
     if success:
@@ -235,8 +234,12 @@ async def process_toggle(message: Message, state: FSMContext):
         app_logger.info(f"Статус аккаунта {message.text} изменен: {status_change}")
 
         # Остановка задач для неактивных аккаунтов
-        if not new_status:
+        if new_status:
+            # Если аккаунт теперь активен, запускаем цикл активности
+            await activity_manager.start_account_activity(message.text, service)
+        else:
             await activity_manager.stop_account_activity(message.text)
+
     else:
         await message.answer("Аккаунт не найден")
     await state.clear()
