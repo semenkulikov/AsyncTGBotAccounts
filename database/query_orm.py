@@ -1,5 +1,5 @@
 from sqlalchemy.future import select
-from database.models import User, Group
+from database.models import User, Group, Account
 from database.models import async_session
 
 
@@ -61,3 +61,9 @@ async def update_user_invoice(user_id: str, invoice_path: str):
             user.path_to_invoice = invoice_path
             await session.commit()
         return user
+
+async def get_account_by_phone(phone: str):
+    """ Функция для получения аккаунта по номеру """
+    async with async_session() as session:
+        result = await session.execute(select(Account).where(Account.phone == phone))
+        return result.scalars().first()
