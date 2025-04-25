@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime, timedelta
 
 from config_data.config import ADMIN_ID
+from database.query_orm import get_all_users
 from loader import bot, dp, app_logger
 from services.services import service, activity_manager
 from services.channel_manager import ChannelManager
@@ -17,15 +18,14 @@ async def main():
     app_logger.info("Подключение к базе данных...")
 
     # Запуск фоновых задач для существующих аккаунтов
-    accounts = await service.get_all_active_accounts()
-    user_ids = {acc.user_id for acc in accounts}
+    users = await get_all_users()
 
-    for user_id in user_ids:
+    for user in users:
         try:
-            await activity_manager.start_user_activity(user_id, service)
+            await activity_manager.start_user_activity(user.user_id, service)
         except Exception:
-            app_logger.info(f"Пользователь с ID: {user_id} не найден!")
-    app_logger.info(f"Запущены фоновые задачи для {len(user_ids)} пользователей...")
+            app_logger.info(f"Пользователь с ID: {user.user_id} не найден!")
+    app_logger.info(f"Запущены фоновые задачи для {len(users)} пользователей...")
 
     # Отправка уведомления администратору
     bot_data = await bot.get_me()
