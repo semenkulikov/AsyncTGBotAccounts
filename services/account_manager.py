@@ -15,7 +15,7 @@ from telethon.tl.functions.messages import SendReactionRequest
 from telethon.tl.types import ReactionEmoji
 from telethon import functions
 
-from database.query_orm import get_user_by_user_id
+from database.query_orm import get_user_by_user_id, get_account_by_phone
 from loader import app_logger, bot
 from services.channel_manager import ChannelManager
 
@@ -92,7 +92,7 @@ class AccountService:
             accounts = result.scalars().all()
             return accounts
 
-    async def toggle_account(self, user_id: int, phone: str) -> tuple[bool, bool]:
+    async def toggle_account(self, user_id: int, phone: str) -> tuple[bool, bool, bool]:
         user = await get_user_by_user_id(user_id)
         app_logger.info(f"Изменение статуса аккаунта {phone} пользователя {user.username}")
         async with async_session() as session:
@@ -115,6 +115,13 @@ class AccountService:
                 account.is_active = not account.is_active
                 new_status = account.is_active
                 await session.commit()
+
+                if new_status is True:
+                    # Если статус аккаунта изменен на "активен", запускаем активность
+                    pass
+                else:
+                    # Если аккаунт не активен теперь, завершаем таску по мониторингу активности
+                    pass
 
                 app_logger.info(f"Статус аккаунта {phone} изменен: {'активен' if new_status else 'неактивен'}")
                 return True, old_status, new_status
@@ -216,7 +223,7 @@ class UserActivityManager:
                 self.user_tasks[user_id] = asyncio.create_task(
                     self._user_monitor_loop(user_id, service)
                 )
-                app_logger.info(f"Запущена проверка активности для пользователя {user.username}")
+                app_logger.info(f"Запущена проверка активности для пользователя {user.username or user.first_name}")
 
     async def stop_user_activity(self, user_id: int):
         user = await get_user_by_user_id(user_id)
@@ -235,32 +242,39 @@ class UserActivityManager:
                 del self.account_tasks[phone]
                 app_logger.info(f"Остановлена активность для аккаунта {phone}")
 
+    async def start_account_activity(self, phone: str, service: AccountService):
+        account = await get_account_by_phone(phone)
+        if phone not in self.account_tasks or self.account_tasks[phone].done():
+            self.account_tasks[phone] = asyncio.create_task(
+                self._account_activity_loop(account, service)
+            )
+            app_logger.info(f"Запущена задача для аккаунта {phone}")
+
+
     async def _user_monitor_loop(self, user_id: int, service: AccountService):
-        app_logger.info(f"Запуск мониторинга активности для пользователя {user_id}")
         # Получаем объект текущего юзера по user_id из модели user
         user = await get_user_by_user_id(user_id)
 
-        while True:
-            try:
-                app_logger.debug(f"Проверка состояния аккаунтов для пользователя {user.username}")
-                accounts = await service.get_user_accounts(user_id)
-                await self._manage_account_tasks(accounts, service)
-                await asyncio.sleep(60)
-                
-            except asyncio.CancelledError:
-                app_logger.warning(f"Мониторинг активности для пользователя {user.username} прерван")
-                break
-            except Exception as e:
-                app_logger.error(f"Ошибка мониторинга: {str(e)}")
-                await asyncio.sleep(60)
+        try:
+            app_logger.debug(f"Проверка состояния аккаунтов для пользователя {user.username or user.first_name}")
+            accounts = await service.get_user_accounts(user_id)
+            await self._manage_account_tasks(accounts, service)
+            # await asyncio.sleep(60)
+
+        except asyncio.CancelledError:
+            app_logger.warning(f"Мониторинг активности для пользователя {user.username} прерван")
+            return None
+        except Exception as e:
+            app_logger.error(f"Ошибка мониторинга: {str(e)}")
+            await asyncio.sleep(60)
 
     async def _manage_account_tasks(self, accounts: List[Account], service: AccountService):
         """Управление задачами для аккаунтов"""
         current_phones = {acc.phone for acc in accounts if acc.is_active}
-        existing_phones = set(self.account_tasks.keys())
+        # existing_phones = set(self.account_tasks.keys())
 
         # Запуск новых задач
-        for phone in current_phones - existing_phones:
+        for phone in current_phones:
             account = next(acc for acc in accounts if acc.phone == phone)
             if phone not in self.account_tasks or self.account_tasks[phone].done():
                 self.account_tasks[phone] = asyncio.create_task(
@@ -268,12 +282,12 @@ class UserActivityManager:
                 )
                 app_logger.info(f"Запущена задача для аккаунта {phone}")
 
-        # Остановка удаленных задач
-        for phone in existing_phones - current_phones:
-            if phone in self.account_tasks and not self.account_tasks[phone].done():
-                self.account_tasks[phone].cancel()
-                del self.account_tasks[phone]
-                app_logger.info(f"Остановлена задача для аккаунта {phone}")
+        # # Остановка удаленных задач
+        # for phone in existing_phones - current_phones:
+        #     if phone in self.account_tasks and not self.account_tasks[phone].done():
+        #         self.account_tasks[phone].cancel()
+        #         del self.account_tasks[phone]
+        #         app_logger.info(f"Остановлена задача для аккаунта {phone}")
 
     async def _account_activity_loop(self, account: Account, service: AccountService):
         app_logger.info(f"Запуск цикла активности для {account.phone}")
