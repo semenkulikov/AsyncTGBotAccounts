@@ -67,3 +67,9 @@ async def get_account_by_phone(phone: str):
     async with async_session() as session:
         result = await session.execute(select(Account).where(Account.phone == phone))
         return result.scalars().first()
+
+async def get_accounts_count_by_user(user_id: str):
+    """ Функция для получения количества аккаунтов пользователя. """
+    async with async_session() as session:
+        result = await session.execute(select(Account).where(Account.user_id == user_id))
+        return result.scalars().count()

@@ -13,7 +13,7 @@ from telethon.network import ConnectionTcpAbridged
 from services.services import service
 
 from database.models import UserChannel, async_session
-from database.query_orm import get_user_by_user_id
+from database.query_orm import get_user_by_user_id, get_accounts_count_by_user
 from keyboards.inline.channels import (
     get_channels_keyboard,
     get_channel_actions_keyboard,
@@ -98,6 +98,8 @@ async def _get_channel_text(channel: UserChannel, channel_manager: ChannelManage
     """Формирует текст для отображения канала"""
     text = f"📢 {channel.channel_title}\n"
     text += f"Статус: {'активен' if channel.is_active else 'неактивен'}\n"
+    text += f"Минимальное количество реакций на пост: {channel.min_reactions}\n"
+    text += f"Максимальное количество реакций на пост: {channel.max_reactions}\n"
     
     # Получаем текущие реакции
     try:
@@ -230,12 +232,16 @@ async def process_channel(message: types.Message, state: FSMContext):
                 await state.clear()
                 return
 
+            account_count = await service.get_accounts_count_by_user(user.id)
+
             # Добавляем канал в базу
             channel_id = await channel_manager.add_channel(
                 user_id=user.id,
                 channel_id=channel.id,
                 username=channel_username,
                 title=channel.title,
+                min_reactions=1,   # Минимум - одна реакция на пост
+                max_reactions=account_count,  # Максимум реакций - сколько аккаунтов у юзера
                 available_reactions=available_reactions
             )
             
