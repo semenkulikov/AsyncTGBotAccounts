@@ -3,6 +3,8 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
 from aiogram.exceptions import TelegramBadRequest
+from sqlalchemy.orm import orm_insert_sentinel
+
 from config_data.config import API_HASH, API_ID
 from telethon.tl.functions.channels import GetFullChannelRequest
 from telethon.tl.types import ReactionEmoji, ChatInviteAlready
@@ -426,6 +428,67 @@ async def process_reaction(callback: CallbackQuery, state: FSMContext):
     except Exception as e:
         app_logger.error(f"Ошибка при обработке реакции: {e}")
         await callback.answer("Произошла ошибка. Попробуйте позже")
+
+@dp.callback_query(F.data.startswith("change_count_reaction_"))
+async def change_count_reaction_callback(callback: CallbackQuery, state: FSMContext):
+    """ Начинает процесс изменения количества реакций """
+    try:
+        channel_id = int(callback.data.split("_")[-1])
+        # Сохраняем данные в состоянии
+        await state.update_data(
+            channel_id=channel_id
+        )
+        await callback.message.edit_text("Введите минимальное и максимально кол-во реакций "
+                                         "в формате min-max (1-15)")
+        await state.set_state(ChannelStates.waiting_for_count_reaction)
+    except Exception as e:
+        app_logger.error(f"Ошибка при парсинге ID канала: {e}")
+        await callback.answer("Произошла ошибка. Попробуйте позже")
+
+
+@dp.message(ChannelStates.waiting_for_count_reaction)
+async def get_count_reaction_handler(message: types.Message, state: FSMContext):
+    """ Получает и сохраняет кол-во реакций для канала """
+    data = await state.get_data()
+    channel_id = data.get("channel_id")
+    app_logger.info(f"Пользователь {message.from_user.full_name} хочет обновить "
+                    f"кол-во реакций для канала {channel_id}: {message.text}")
+
+    if not channel_id:
+        await message.answer("Ошибка: данные о канале не найдены")
+        return
+
+    async with async_session() as session:
+        channel_manager = ChannelManager(session)
+        channel = await channel_manager.get_channel(channel_id)
+
+        if not channel:
+            await message.answer("Ошибка: канал не найден")
+            return
+
+        try:
+            min_reactions, max_reactions = message.text.split("-")
+        except Exception:
+            await message.answer("Данные введены в неверном формате!")
+            await state.clear()
+            return
+
+        result = await channel_manager.update_reactions_count(
+            channel_id,
+            int(min_reactions),
+            int(max_reactions)
+        )
+        if result:
+            await message.answer("Количество реакций успешно обновлено!")
+            await message.answer(
+                "Управление каналами",
+                reply_markup=get_channels_keyboard()
+            )
+        else:
+            await message.answer("Произошла ошибка при обновлении количества каналов!")
+            await state.clear()
+            app_logger.error("Произошла ошибка при обновлении количества каналов!")
+
 
 
 @dp.callback_query(F.data == "back_to_channels")

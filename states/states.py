@@ -17,3 +17,4 @@ class ChannelStates(StatesGroup):
     waiting_for_channel = State()
     waiting_for_reaction = State()
     waiting_for_interval = State()
+    waiting_for_count_reaction = State()

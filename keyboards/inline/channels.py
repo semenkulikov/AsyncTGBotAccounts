@@ -41,6 +41,10 @@ def get_channel_actions_keyboard(channel_id: int, current_index: int, total_chan
         callback_data=f"change_reaction_{channel_id}"
     ))
     builder.add(InlineKeyboardButton(
+        text="🔄 Изменить количество реакций",
+        callback_data=f"change_count_reaction_{channel_id}"
+    ))
+    builder.add(InlineKeyboardButton(
         text="⬅️ Назад",
         callback_data="back_to_channels"
     ))

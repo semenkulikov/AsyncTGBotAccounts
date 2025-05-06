@@ -111,6 +111,18 @@ class ChannelManager:
             return reaction.available_reactions, reaction.user_reactions
         return [], None
 
+    async def update_reactions_count(self, channel_id: int, min_reactions: int, max_reactions: int) -> bool:
+        """ Метод для обновления количества реакций для канала """
+        try:
+            cur_channel = await self.get_channel(channel_id)
+            if cur_channel:
+                cur_channel.min_reactions = min_reactions
+                cur_channel.max_reactions = max_reactions
+                await self.session.commit()
+            return True
+        except Exception:
+            return False
+
     async def check_new_posts(self, channel: UserChannel, client: TelegramClient) -> list[int]:
         try:
             # Получаем последние сообщения из канала
