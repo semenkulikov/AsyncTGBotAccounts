@@ -366,6 +366,25 @@ class UserActivityManager:
                         new_posts = await channel_manager.check_new_posts(channel, client)
                         if new_posts and user_reactions:
                             for post_id in new_posts:
+                                msg = await client.get_messages(
+                                    entity=channel.channel_id,
+                                    ids=post_id
+                                )
+
+                                # Если у сообщения нет реакций, treat as 0
+                                rx = 0
+                                if msg.reactions:
+                                    # msg.reactions.results — список объектов ReactionCount
+                                    # каждый имеет .count
+                                    rx = sum(r.count for r in msg.reactions.results)
+
+                                # Пропускаем, если уже зашкаливает
+                                if rx > channel.max_reactions or rx < channel.min_reactions:
+                                    app_logger.warning(f"Пропустил реакцию "
+                                                       f"{channel.min_reactions} < {rx} < {channel.max_reactions} "
+                                                       f"на канале {channel.channel_title} "
+                                                       f"для поста {post_id}")
+                                    continue
                                 try:
                                     await client(SendReactionRequest(
                                         peer=channel.channel_id,
