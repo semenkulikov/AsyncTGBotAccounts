@@ -21,7 +21,13 @@ class ChannelManager:
         result = await self.session.execute(query)
         return result.scalars().all()
 
-    async def add_channel(self, user_id: int, channel_id: int, username: str, title: str, available_reactions: list) -> int:
+    async def add_channel(self, user_id: int,
+                          channel_id: int,
+                          username: str,
+                          title: str,
+                          min_reactions: int,
+                          max_reactions: int,
+                          available_reactions: list) -> int:
         """Добавляет новый канал для пользователя"""
         try:
             channel_id = int("-100" + str(channel_id))  # Приводим ID канала к стандартному виду
@@ -30,6 +36,8 @@ class ChannelManager:
                 channel_id=channel_id,
                 channel_username=username,
                 channel_title=title,
+                min_reactions=min_reactions,
+                max_reactions=max_reactions,
                 is_active=True
             )
             self.session.add(channel)

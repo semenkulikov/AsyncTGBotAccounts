@@ -234,7 +234,7 @@ async def process_channel(message: types.Message, state: FSMContext):
                 await state.clear()
                 return
 
-            account_count = await service.get_accounts_count_by_user(user.id)
+            account_count = await get_accounts_count_by_user(message.from_user.id)
 
             # Добавляем канал в базу
             channel_id = await channel_manager.add_channel(
@@ -242,8 +242,8 @@ async def process_channel(message: types.Message, state: FSMContext):
                 channel_id=channel.id,
                 username=channel_username,
                 title=channel.title,
-                min_reactions=1,   # Минимум - одна реакция на пост
-                max_reactions=account_count,  # Максимум реакций - сколько аккаунтов у юзера
+                min_reactions=1,   # Минимум — одна реакция на пост
+                max_reactions=account_count,  # Максимум реакций — сколько аккаунтов у юзера
                 available_reactions=available_reactions
             )
             
@@ -473,6 +473,11 @@ async def get_count_reaction_handler(message: types.Message, state: FSMContext):
             await state.clear()
             return
 
+        account_count = await get_accounts_count_by_user(message.from_user.id)
+        if int(max_reactions) > account_count:
+            await message.answer(f"Вы не можете ввести MAX больше количества аккаунтов ({account_count})!")
+            return
+
         result = await channel_manager.update_reactions_count(
             channel_id,
             int(min_reactions),
@@ -488,7 +493,6 @@ async def get_count_reaction_handler(message: types.Message, state: FSMContext):
             await message.answer("Произошла ошибка при обновлении количества каналов!")
             await state.clear()
             app_logger.error("Произошла ошибка при обновлении количества каналов!")
-
 
 
 @dp.callback_query(F.data == "back_to_channels")

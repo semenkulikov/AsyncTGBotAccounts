@@ -72,4 +72,4 @@ async def get_accounts_count_by_user(user_id: str):
     """ Функция для получения количества аккаунтов пользователя. """
     async with async_session() as session:
         result = await session.execute(select(Account).where(Account.user_id == user_id))
-        return result.scalars().count()
+        return len(result.scalars().all())
