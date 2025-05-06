@@ -127,6 +127,7 @@ async def process_channel(message: types.Message, state: FSMContext):
         channel_link = message.text.strip()
         if not channel_link.startswith('@') and not channel_link.startswith('https://t.me/'):
             await message.answer("Пожалуйста, отправьте корректную ссылку на канал")
+            await state.clear()
             return
 
         async with async_session() as session:
