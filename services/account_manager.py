@@ -5,7 +5,7 @@ import asyncio
 import random
 from datetime import datetime, UTC
 from telethon import TelegramClient
-from telethon.errors import SessionExpiredError, SessionPasswordNeededError, AuthKeyError, FloodWaitError
+from telethon.errors import SessionExpiredError, SessionPasswordNeededError, AuthKeyError, FloodWaitError, RPCError
 from telethon.sessions import StringSession
 from config_data.config import CHECK_INTERVAL_MIN, CHECK_INTERVAL_MAX, API_ID, API_HASH
 from database.models import Account, User, async_session
@@ -308,7 +308,7 @@ class UserActivityManager:
         """Выполняет активность для аккаунта."""
         session_str = await service.decrypt_session(account.session)
 
-        async with TelegramClient(
+        client = TelegramClient(
             session=StringSession(session_str),
             api_id=API_ID,
             api_hash=API_HASH,
@@ -320,9 +320,21 @@ class UserActivityManager:
             system_lang_code="en-US",
             timeout=30,
             auto_reconnect=False
-        ) as client:
+        )
+        try:
             await client.connect()
+        except RPCError as e:
+            # сессия вовсе не может подключиться (удалена/отозвана)
+            await self._handle_invalid_session(service, account.phone, account.user_id)
+            return
 
+        # проверяем, авторизованы ли мы
+        if not await client.is_user_authorized():
+            # файл сессии пустой или невалидный
+            await self._handle_invalid_session(service, account.phone, account.user_id)
+            await client.disconnect()
+            return
+        try:
             await client(functions.account.UpdateStatusRequest(
                         offline=False
                     ))
@@ -403,10 +415,11 @@ class UserActivityManager:
                         continue
 
             await service.update_last_active(account.phone)
-            
+
             await client(functions.account.UpdateStatusRequest(
                         offline=True
                     ))
+        finally:
             await client.disconnect()
 
     async def _handle_invalid_session(self, service: AccountService, phone: str, user_id: int):
