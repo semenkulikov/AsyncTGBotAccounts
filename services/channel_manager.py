@@ -131,6 +131,17 @@ class ChannelManager:
         except Exception:
             return False
 
+    async def update_views_count(self, channel_id: int, views_count: int) -> bool:
+        """ Метод для обновления количества просмотров для канала """
+        try:
+            cur_channel = await self.get_channel(channel_id)
+            if cur_channel:
+                cur_channel.views = views_count
+                await self.session.commit()
+            return True
+        except Exception:
+            return False
+
     async def check_new_posts(self, channel: UserChannel, client: TelegramClient) -> list[int]:
         try:
             # Получаем последние сообщения из канала

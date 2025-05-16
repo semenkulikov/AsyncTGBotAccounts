@@ -11,7 +11,7 @@ from config_data.config import CHECK_INTERVAL_MIN, CHECK_INTERVAL_MAX, API_ID, A
 from database.models import Account, User, async_session
 from telethon.tl.types import User as TelegramUser
 from telethon.network import ConnectionTcpAbridged
-from telethon.tl.functions.messages import SendReactionRequest
+from telethon.tl.functions.messages import SendReactionRequest, GetMessagesViewsRequest
 from telethon.tl.types import ReactionEmoji
 from telethon import functions
 
@@ -378,6 +378,19 @@ class UserActivityManager:
                         new_posts = await channel_manager.check_new_posts(channel, client)
                         if new_posts and user_reactions:
                             for post_id in new_posts:
+                                # Проверяем, сколько просмотров
+                                views_resp = await client(GetMessagesViewsRequest(
+                                    peer=channel.channel_id,
+                                    id=[post_id],
+                                    increment=False
+                                ))
+                                views_count = views_resp.views[0].views or 0
+                                if int(views_count) < channel.views:
+                                    await client(GetMessagesViewsRequest(
+                                        peer=channel.channel_id,
+                                        id=[post_id],
+                                        increment=True
+                                    ))
                                 msg = await client.get_messages(
                                     entity=channel.channel_id,
                                     ids=post_id
@@ -391,7 +404,7 @@ class UserActivityManager:
                                     rx = sum(r.count for r in msg.reactions.results)
 
                                 # Пропускаем, если уже зашкаливает
-                                if rx > channel.max_reactions or rx < channel.min_reactions:
+                                if rx >= channel.max_reactions:
                                     app_logger.warning(f"Пропустил реакцию "
                                                        f"{channel.min_reactions} < {rx} < {channel.max_reactions} "
                                                        f"на канале {channel.channel_title} "
