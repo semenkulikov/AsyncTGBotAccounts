@@ -62,6 +62,7 @@ class UserChannel(Base):
     last_checked = Column(DateTime, default=datetime.utcnow)
     min_reactions = Column(Integer, default=1)
     max_reactions = Column(Integer, default=15)
+    views = Column(Integer, default=0)
 
     user = relationship("User", back_populates="channels")
     reactions = relationship("AccountReaction", back_populates="channel")
