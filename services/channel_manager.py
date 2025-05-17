@@ -5,10 +5,19 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from database.models import UserChannel, AccountReaction
 from telethon import TelegramClient
-from telethon.tl.functions.messages import GetHistoryRequest
-from telethon.tl.types import InputPeerChannel
+from telethon.tl.functions.messages import GetHistoryRequest, ImportChatInviteRequest
+from telethon.tl.types import InputPeerChannel, PeerChannel
+from telethon.tl.functions.channels import GetFullChannelRequest, JoinChannelRequest
+from telethon.errors import (
+    ChannelPrivateError,
+    InviteHashEmptyError,
+    InviteHashExpiredError,
+    InviteHashInvalidError,
+    UserAlreadyParticipantError,
+)
 from config_data.config import API_ID, API_HASH
 import asyncio
+from loader import app_logger
 from database.query_orm import get_user_by_user_id
 
 class ChannelManager:
@@ -144,12 +153,97 @@ class ChannelManager:
 
     async def check_new_posts(self, channel: UserChannel, client: TelegramClient) -> list[int]:
         try:
-            # Получаем последние сообщения из канала
-            messages = await client.get_messages(
-                channel.channel_id,
-                limit=10
-            )
+            peer = None  # Инициализируем peer None изначально
             
+            # Правильно обрабатываем ID канала
+            # Telegram API ожидает ID без префикса -100
+            orig_channel_id = channel.channel_id
+            
+            # Извлекаем только ID канала без префикса -100
+            if str(orig_channel_id).startswith('-100'):
+                # Берем только часть после -100
+                channel_id = int(str(abs(orig_channel_id))[3:])
+                app_logger.debug(f"Извлекаем ID канала: {orig_channel_id} -> {channel_id}")
+            else:
+                channel_id = abs(orig_channel_id)
+            
+            # Сначала проверяем, можно ли получить канал по username
+            if channel.channel_username and channel.channel_username.strip():
+                try:
+                    # Если это ссылка-приглашение (начинается с +)
+                    if channel.channel_username.startswith('+'):
+                        invite_hash = channel.channel_username[1:]
+                        try:
+                            # Пытаемся присоединиться к каналу
+                            app_logger.debug(f"Присоединяемся к каналу по хэшу: {invite_hash}")
+                            updates = await client(ImportChatInviteRequest(invite_hash))
+                            # После успешного присоединения получаем диалоги заново
+                            await client.get_dialogs()
+                        except UserAlreadyParticipantError:
+                            app_logger.debug(f"Уже участник канала с хэшем {invite_hash}")
+                        except Exception as e:
+                            app_logger.error(f"Ошибка при подключении к каналу: {e}")
+                    
+                    # Пробуем получить сущность канала
+                    peer = await client.get_entity(channel.channel_username)
+                    app_logger.debug(f"Канал получен по юзернейму: {channel.channel_username}")
+                except Exception as e:
+                    app_logger.debug(f"Не удалось получить канал по юзернейму: {e}")
+                    
+            # Если не удалось получить по юзернейму или его нет, пробуем искать в диалогах
+            if not peer:
+                try:
+                    dialogs = await client.get_dialogs()
+                    
+                    for dialog in dialogs:
+                        if hasattr(dialog.entity, 'id'):
+                            dialog_id = dialog.entity.id
+                            # Проверяем и по чистому ID и по полному ID
+                            if dialog_id == channel_id or dialog_id == abs(orig_channel_id):
+                                peer = dialog.entity
+                                app_logger.info(f"Канал найден в диалогах: {dialog_id}")
+                                break
+                except Exception as e:
+                    app_logger.error(f"Ошибка при поиске в диалогах: {e}")
+            
+            # Если не нашли канал, пробуем другие способы
+            if not peer:
+                try:
+                    # Пробуем через PeerChannel с правильным ID
+                    app_logger.debug(f"Пробуем получить через PeerChannel({channel_id})")
+                    peer = await client.get_entity(PeerChannel(channel_id))
+                    app_logger.info(f"Канал успешно получен через PeerChannel({channel_id})")
+                except Exception as e:
+                    app_logger.debug(f"Не удалось получить через PeerChannel: {e}")
+                    
+                    # Пробуем через t.me/c/ID
+                    try:
+                        app_logger.debug(f"Пробуем получить канал по ссылке t.me/c/{channel_id}")
+                        peer = await client.get_entity(f"t.me/c/{channel_id}")
+                        app_logger.info(f"Канал получен через t.me/c/{channel_id}")
+                    except Exception as e:
+                        app_logger.debug(f"Не удалось получить канал через t.me/c/: {e}")
+                        
+                        # Попытка получить через GetFullChannelRequest
+                        try:
+                            app_logger.debug(f"Пробуем получить через GetFullChannelRequest({channel_id})")
+                            result = await client(GetFullChannelRequest(channel=PeerChannel(channel_id=channel_id)))
+                            if result and result.chats:
+                                peer = result.chats[0]
+                                app_logger.info(f"Канал получен через GetFullChannelRequest: {channel_id}")
+                        except Exception as e:
+                            app_logger.debug(f"Не удалось получить через GetFullChannelRequest: {e}")
+            
+            # Если все попытки не удались, выходим
+            if not peer:
+                app_logger.warning(f"Не удалось найти канал {orig_channel_id}")
+                return []
+            
+            # Получаем сообщения
+            app_logger.debug(f"Получаем сообщения из канала {orig_channel_id}")
+            messages = await client.get_messages(peer, limit=10)
+            
+            # Проверяем новые сообщения
             new_post_ids = []
             for message in messages:
                 # Добавляем часовой пояс UTC к message.date
@@ -157,12 +251,15 @@ class ChannelManager:
                 if message_date > channel.last_checked.replace(tzinfo=UTC):
                     new_post_ids.append(message.id)
             
+            # Обновляем время последней проверки
             channel.last_checked = datetime.now(UTC)
             await self.session.commit()
             
+            if new_post_ids:  # Логируем только если есть новые сообщения
+                app_logger.info(f"Найдено {len(new_post_ids)} новых сообщений в канале {orig_channel_id}")
             return new_post_ids
         except Exception as e:
-            print(f"Error checking posts for channel {channel.channel_id}: {e}")
+            app_logger.error(f"Ошибка при проверке постов канала {channel.channel_id}: {e}")
             return []
 
     async def set_reaction(self, client: TelegramClient, channel_id: int, post_id: int, reaction: str) -> bool:
@@ -187,25 +284,62 @@ class ChannelManager:
                 API_ID,
                 API_HASH
             ) as client:
-                new_posts = await self.check_new_posts(channel, client)
-                
-                for post_id in new_posts:
-                    cur_reaction = random.choice(channel.reactions)
-                    success = await self.set_reaction(
-                        client,
-                        channel.channel_id,
-                        post_id,
-                        cur_reaction
-                    )
+                try:
+                    new_posts = await self.check_new_posts(channel, client)
                     
-                    if success:
-                        reaction = AccountReaction(
-                            account_id=account.id,
-                            channel_id=channel.id,
-                            post_id=post_id,
-                            reaction=cur_reaction
-                        )
-                        self.session.add(reaction)
-                        await self.session.commit()
+                    # Если нет новых постов - пропускаем
+                    if not new_posts:
+                        continue
                         
-                    await asyncio.sleep(5)  # Задержка между реакциями 
+                    for post_id in new_posts:
+                        # Получаем правильный ID канала без префикса -100
+                        orig_channel_id = channel.channel_id
+                        if str(orig_channel_id).startswith('-100'):
+                            channel_id = int(str(abs(orig_channel_id))[3:])
+                        else:
+                            channel_id = abs(orig_channel_id)
+                            
+                        # Получаем доступные реакции канала
+                        available_reactions, user_reactions = await self.get_channel_reactions(channel.id)
+                        
+                        # Если пользователь выбрал свои реакции, используем их, иначе доступные
+                        reactions_to_use = user_reactions if user_reactions else available_reactions
+                        
+                        if not reactions_to_use:
+                            app_logger.warning(f"Нет доступных реакций для канала {channel.id}")
+                            continue
+                            
+                        # Выбираем случайную реакцию
+                        cur_reaction = random.choice(reactions_to_use)
+                        
+                        try:
+                            # Получаем entity канала
+                            channel_entity = await client.get_entity(PeerChannel(channel_id))
+                            
+                            # Отправляем реакцию
+                            await client.send_reaction(
+                                entity=channel_entity,
+                                message=post_id,
+                                reaction=cur_reaction
+                            )
+                            
+                            app_logger.info(f"Установлена реакция {cur_reaction} на пост {post_id} в канале {orig_channel_id}")
+                            
+                            # Сохраняем информацию о реакции
+                            reaction = AccountReaction(
+                                account_id=account.id,
+                                channel_id=channel.id,
+                                post_id=post_id,
+                                reaction=cur_reaction
+                            )
+                            self.session.add(reaction)
+                            await self.session.commit()
+                            
+                        except Exception as e:
+                            app_logger.error(f"Ошибка при установке реакции: {e}")
+                            
+                        # Задержка между реакциями
+                        await asyncio.sleep(5)
+                except Exception as e:
+                    app_logger.error(f"Ошибка обработки канала {channel.id}: {e}")
+                    continue 
