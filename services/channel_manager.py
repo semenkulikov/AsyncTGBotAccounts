@@ -151,7 +151,7 @@ class ChannelManager:
         except Exception:
             return False
 
-    async def check_new_posts(self, channel: UserChannel, client: TelegramClient) -> list[int]:
+    async def check_new_posts(self, channel: UserChannel, client: TelegramClient, account_id: int = None) -> list[int]:
         try:
             peer = None  # Инициализируем peer None изначально
             
@@ -241,19 +241,44 @@ class ChannelManager:
             
             # Получаем сообщения
             app_logger.debug(f"Получаем сообщения из канала {orig_channel_id}")
-            messages = await client.get_messages(peer, limit=10)
+            messages = await client.get_messages(peer, limit=20)  # Увеличиваем лимит сообщений
+            
+            # Получаем время последней проверки канала
+            check_time = channel.last_checked.replace(tzinfo=UTC)
             
             # Проверяем новые сообщения
             new_post_ids = []
+            
+            # Также проверяем, не ставил ли этот аккаунт реакцию на этот пост ранее
             for message in messages:
                 # Добавляем часовой пояс UTC к message.date
                 message_date = message.date.replace(tzinfo=UTC)
-                if message_date > channel.last_checked.replace(tzinfo=UTC):
-                    new_post_ids.append(message.id)
+                
+                # Сообщение новее времени последней проверки
+                if message_date > check_time:
+                    # Если указан ID аккаунта, проверяем, не ставил ли этот аккаунт уже реакцию
+                    if account_id:
+                        # Проверяем, ставил ли этот аккаунт реакцию на этот пост
+                        query = select(AccountReaction).where(
+                            AccountReaction.account_id == account_id,
+                            AccountReaction.channel_id == channel.id,
+                            AccountReaction.post_id == message.id
+                        )
+                        result = await self.session.execute(query)
+                        existing_reaction = result.scalar_one_or_none()
+                        
+                        # Если реакции от этого аккаунта еще нет, добавляем пост в список новых
+                        if not existing_reaction:
+                            new_post_ids.append(message.id)
+                    else:
+                        # Если ID аккаунта не указан, просто добавляем пост
+                        new_post_ids.append(message.id)
             
-            # Обновляем время последней проверки
-            channel.last_checked = datetime.now(UTC)
-            await self.session.commit()
+            # Обновляем время последней проверки только для самого канала,
+            # реакции от разных аккаунтов будем отслеживать отдельно
+            if not account_id:  # Обновляем только если это общая проверка, а не для конкретного аккаунта
+                channel.last_checked = datetime.now(UTC)
+                await self.session.commit()
             
             if new_post_ids:  # Логируем только если есть новые сообщения
                 app_logger.info(f"Найдено {len(new_post_ids)} новых сообщений в канале {orig_channel_id}")
@@ -275,7 +300,25 @@ class ChannelManager:
             return False
 
     async def process_channel_posts(self, channel: UserChannel, accounts: list) -> None:
-        for account in accounts:
+        # Получаем доступные реакции канала
+        available_reactions, user_reactions = await self.get_channel_reactions(channel.id)
+        
+        # Если пользователь выбрал свои реакции, используем их, иначе доступные
+        reactions_to_use = user_reactions if user_reactions else available_reactions
+        
+        if not reactions_to_use:
+            app_logger.warning(f"Нет доступных реакций для канала {channel.id}")
+            return
+            
+        # Перемешиваем список аккаунтов для более случайного распределения реакций
+        shuffled_accounts = list(accounts)
+        random.shuffle(shuffled_accounts)
+        
+        # Счетчик для контроля числа реакций для всех постов
+        post_reaction_counts = {}
+        
+        # Проходим по всем активным аккаунтам
+        for account in shuffled_accounts:
             if not account.is_active:
                 continue
                 
@@ -285,12 +328,14 @@ class ChannelManager:
                 API_HASH
             ) as client:
                 try:
-                    new_posts = await self.check_new_posts(channel, client)
+                    # Получаем новые посты, учитывая, что данный аккаунт еще не ставил на них реакции
+                    new_posts = await self.check_new_posts(channel, client, account.id)
                     
                     # Если нет новых постов - пропускаем
                     if not new_posts:
                         continue
-                        
+                    
+                    # Для каждого нового поста
                     for post_id in new_posts:
                         # Получаем правильный ID канала без префикса -100
                         orig_channel_id = channel.channel_id
@@ -299,14 +344,20 @@ class ChannelManager:
                         else:
                             channel_id = abs(orig_channel_id)
                             
-                        # Получаем доступные реакции канала
-                        available_reactions, user_reactions = await self.get_channel_reactions(channel.id)
-                        
-                        # Если пользователь выбрал свои реакции, используем их, иначе доступные
-                        reactions_to_use = user_reactions if user_reactions else available_reactions
-                        
-                        if not reactions_to_use:
-                            app_logger.warning(f"Нет доступных реакций для канала {channel.id}")
+                        # Инициализируем счетчик для данного поста, если его еще нет
+                        if post_id not in post_reaction_counts:
+                            # Проверяем текущее количество реакций для этого поста
+                            query = select(AccountReaction).where(
+                                AccountReaction.channel_id == channel.id,
+                                AccountReaction.post_id == post_id
+                            )
+                            result = await self.session.execute(query)
+                            existing_reactions = result.scalars().all()
+                            post_reaction_counts[post_id] = len(existing_reactions)
+                            
+                        # Проверяем, не превышено ли максимальное количество реакций
+                        if post_reaction_counts[post_id] >= channel.max_reactions:
+                            app_logger.info(f"Достигнут лимит реакций ({channel.max_reactions}) для поста {post_id}")
                             continue
                             
                         # Выбираем случайную реакцию
@@ -323,7 +374,7 @@ class ChannelManager:
                                 reaction=cur_reaction
                             )
                             
-                            app_logger.info(f"Установлена реакция {cur_reaction} на пост {post_id} в канале {orig_channel_id}")
+                            app_logger.info(f"Установлена реакция {cur_reaction} на пост {post_id} в канале {orig_channel_id} (аккаунт {account.phone})")
                             
                             # Сохраняем информацию о реакции
                             reaction = AccountReaction(
@@ -334,6 +385,9 @@ class ChannelManager:
                             )
                             self.session.add(reaction)
                             await self.session.commit()
+                            
+                            # Увеличиваем счетчик реакций для этого поста
+                            post_reaction_counts[post_id] += 1
                             
                         except Exception as e:
                             app_logger.error(f"Ошибка при установке реакции: {e}")
