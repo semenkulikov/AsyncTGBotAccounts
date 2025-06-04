@@ -242,6 +242,7 @@ async def process_channel(message: types.Message, state: FSMContext):
                         full_channel = await client(GetFullChannelRequest(channel))
                         
                         # Подписываемся на канал и отключаем уведомления
+                        """
                         try:
                             # Пытаемся присоединиться к каналу
                             await client(JoinChannelRequest(channel))
@@ -268,6 +269,7 @@ async def process_channel(message: types.Message, state: FSMContext):
                             app_logger.info(f"Успешно отключили уведомления для канала {channel.title}")
                         except Exception as e:
                             app_logger.error(f"Ошибка при подписке на канал или отключении уведомлений: {e}")
+                        """
 
                     # Обработка ситуации уже добавленного канала
                     if channel.title in user_channels:
