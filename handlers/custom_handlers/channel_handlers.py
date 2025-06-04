@@ -6,7 +6,7 @@ from aiogram.exceptions import TelegramBadRequest
 from sqlalchemy.orm import orm_insert_sentinel
 
 from config_data.config import API_HASH, API_ID
-from telethon.tl.functions.channels import GetFullChannelRequest
+from telethon.tl.functions.channels import GetFullChannelRequest, JoinChannelRequest
 from telethon.tl.types import ReactionEmoji, ChatInviteAlready
 from telethon.tl.functions.messages import ImportChatInviteRequest, CheckChatInviteRequest
 from telethon import TelegramClient
@@ -196,12 +196,78 @@ async def process_channel(message: types.Message, state: FSMContext):
                             channel = await client.get_entity(invite.chat.id)
                             full_channel = await client(GetFullChannelRequest(channel))
                         else:
-                            # Аккаунт не присоединен к каналу
-                            await message.answer("Аккаунт не присоединен к закрытому каналу!")
-                            return
+                            # Присоединяемся к каналу
+                            try:
+                                # Пытаемся присоединиться к каналу
+                                result = await client(ImportChatInviteRequest(channel_username[1:]))
+                                if hasattr(result, 'chats') and result.chats:
+                                    channel = result.chats[0]
+                                    full_channel = await client(GetFullChannelRequest(channel))
+                                    
+                                    # Подписываемся на канал и отключаем уведомления
+                                    try:
+                                        await client(JoinChannelRequest(channel))
+                                        app_logger.info(f"Успешно подписались на канал {channel.title}")
+                                        
+                                        # Полностью отключаем уведомления
+                                        from telethon.tl.functions.account import UpdateNotifySettingsRequest
+                                        from telethon.tl.types import InputPeerNotifySettings, InputNotifyPeer
+                                        
+                                        # Создаем настройки с полностью выключенными уведомлениями
+                                        settings = InputPeerNotifySettings(
+                                            show_previews=False,
+                                            silent=True,
+                                            mute_until=2147483647,  # Максимальное значение времени
+                                            sound=None              # Отключаем звук
+                                        )
+                                        
+                                        # Применяем настройки к каналу
+                                        await client(UpdateNotifySettingsRequest(
+                                            peer=InputNotifyPeer(peer=channel),
+                                            settings=settings
+                                        ))
+                                        
+                                        app_logger.info(f"Успешно отключили уведомления для канала {channel.title}")
+                                    except Exception as e:
+                                        app_logger.error(f"Ошибка при подписке на канал или отключении уведомлений: {e}")
+                                else:
+                                    await message.answer("Не удалось присоединиться к закрытому каналу!")
+                                    return
+                            except Exception as e:
+                                app_logger.error(f"Ошибка при присоединении к закрытому каналу: {e}")
+                                await message.answer("Ошибка при присоединении к закрытому каналу!")
+                                return
                     else:
                         channel = await client.get_entity(channel_username)
                         full_channel = await client(GetFullChannelRequest(channel))
+                        
+                        # Подписываемся на канал и отключаем уведомления
+                        try:
+                            # Пытаемся присоединиться к каналу
+                            await client(JoinChannelRequest(channel))
+                            app_logger.info(f"Успешно подписались на канал {channel.title}")
+                            
+                            # Полностью отключаем уведомления
+                            from telethon.tl.functions.account import UpdateNotifySettingsRequest
+                            from telethon.tl.types import InputPeerNotifySettings, InputNotifyPeer
+                            
+                            # Создаем настройки с полностью выключенными уведомлениями
+                            settings = InputPeerNotifySettings(
+                                show_previews=False,
+                                silent=True,
+                                mute_until=2147483647,  # Максимальное значение времени
+                                sound=None              # Отключаем звук
+                            )
+                            
+                            # Применяем настройки к каналу
+                            await client(UpdateNotifySettingsRequest(
+                                peer=InputNotifyPeer(peer=channel),
+                                settings=settings
+                            ))
+                            
+                            app_logger.info(f"Успешно отключили уведомления для канала {channel.title}")
+                        except Exception as e:
+                            app_logger.error(f"Ошибка при подписке на канал или отключении уведомлений: {e}")
 
                     # Обработка ситуации уже добавленного канала
                     if channel.title in user_channels:
@@ -247,6 +313,9 @@ async def process_channel(message: types.Message, state: FSMContext):
                 max_reactions=account_count,  # Максимум реакций — сколько аккаунтов у юзера
                 available_reactions=available_reactions
             )
+            
+            # Логируем добавление канала
+            app_logger.info(f"Пользователь {message.from_user.id} добавил канал {channel.title} (ID: {channel.id})")
             
             # Сохраняем данные в состоянии
             await state.update_data(
@@ -577,3 +646,58 @@ async def back_to_channels_callback(callback: CallbackQuery):
     except Exception as e:
         app_logger.error(f"Error in back_to_channels_callback: {e}")
         await callback.answer("Произошла ошибка", show_alert=True)
+
+@dp.callback_query(F.data == "search_user_channel")
+async def search_user_channel_start(callback: CallbackQuery, state: FSMContext):
+    """Начинает процесс поиска канала пользователя"""
+    await callback.message.edit_text("Введите название или юзернейм канала для поиска:")
+    await state.set_state(ChannelStates.waiting_for_channel_search)
+    await callback.answer()
+
+
+@dp.message(ChannelStates.waiting_for_channel_search)
+async def search_user_channel_process(message: types.Message, state: FSMContext):
+    """Обрабатывает поисковый запрос по каналам пользователя"""
+    search_query = message.text.strip()
+    
+    if not search_query:
+        await message.answer("Пожалуйста, введите поисковый запрос")
+        return
+        
+    try:
+        async with async_session() as session:
+            user = await get_user_by_user_id(str(message.from_user.id))
+            channel_manager = ChannelManager(session)
+            
+            # Получаем все каналы пользователя
+            all_user_channels = await channel_manager.get_user_channels(user.id)
+            
+            # Фильтруем каналы по поисковому запросу
+            channels = []
+            search_query_lower = search_query.lower()
+            for channel in all_user_channels:
+                if (search_query_lower in channel.channel_title.lower() or 
+                    (channel.channel_username and search_query_lower in channel.channel_username.lower())):
+                    channels.append(channel)
+            
+            if not channels:
+                await message.answer(
+                    f"По запросу '{search_query}' ничего не найдено",
+                    reply_markup=get_channels_keyboard()
+                )
+            else:
+                # Показываем первый канал из результатов поиска
+                await message.answer(
+                    f"Результаты поиска по запросу '{search_query}':"
+                )
+                await message.answer(
+                    await _get_channel_text(channels[0], channel_manager),
+                    reply_markup=get_channel_actions_keyboard(channels[0].id, 0, len(channels))
+                )
+                
+            await state.clear()
+    except Exception as e:
+        app_logger.error(f"Ошибка при поиске каналов: {e}")
+        await message.answer("Произошла ошибка при поиске каналов", 
+                            reply_markup=get_channels_keyboard())
+        await state.clear()

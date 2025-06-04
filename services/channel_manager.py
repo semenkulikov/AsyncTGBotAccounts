@@ -396,4 +396,20 @@ class ChannelManager:
                         await asyncio.sleep(5)
                 except Exception as e:
                     app_logger.error(f"Ошибка обработки канала {channel.id}: {e}")
-                    continue 
+                    continue
+
+    async def search_channels(self, query: str) -> List[UserChannel]:
+        """Ищет каналы по названию или юзернейму"""
+        try:
+            # Используем LIKE для поиска по подстроке
+            search_query = f"%{query}%"
+            result = await self.session.execute(
+                select(UserChannel).where(
+                    UserChannel.channel_title.like(search_query) | 
+                    UserChannel.channel_username.like(search_query)
+                )
+            )
+            return result.scalars().all()
+        except Exception as e:
+            app_logger.error(f"Ошибка при поиске каналов: {e}")
+            return [] 

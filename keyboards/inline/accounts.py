@@ -10,8 +10,13 @@ async def users_markup() -> InlineKeyboardMarkup:
         # Добавляем кнопку только если пользователь не является администратором
         if int(user.user_id) != int(ADMIN_ID):
             builder.button(text=user.username, callback_data=str(user.id))
+    
+    # Добавляем кнопку для управления каналами
+    builder.button(text="📢 Каналы", callback_data="channels")
+    
     # Добавляем кнопку "Выйти"
     builder.button(text="Выйти", callback_data="Выход")
+    
     # Располагаем кнопки в 2 колонки
     builder.adjust(2)
     return builder.as_markup()

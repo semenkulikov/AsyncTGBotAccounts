@@ -8,6 +8,10 @@ def get_channels_keyboard() -> InlineKeyboardMarkup:
         callback_data="add_channel"
     ))
     builder.add(InlineKeyboardButton(
+        text="🔍 Поиск канала",
+        callback_data="search_user_channel"
+    ))
+    builder.add(InlineKeyboardButton(
         text="📋 Мои каналы",
         callback_data="my_channels"
     ))
@@ -88,5 +92,26 @@ def get_reactions_keyboard(reactions: list[tuple[str, str]], selected_reactions:
         callback_data="finish_reactions"
     ))
     
+    return builder.as_markup()
+
+async def admin_channels_markup(channels=None) -> InlineKeyboardMarkup:
+    """Создает клавиатуру с каналами для админки"""
+    builder = InlineKeyboardBuilder()
+    
+    if channels:
+        for channel in channels:
+            builder.button(
+                text=f"{channel.channel_title}",
+                callback_data=f"admin_channel_{channel.id}"
+            )
+    
+    # Добавляем кнопку поиска
+    builder.button(text="🔍 Поиск", callback_data="search_channel")
+    
+    # Добавляем кнопку "Выйти"
+    builder.button(text="◀️ Назад", callback_data="back_to_admin")
+    
+    # Располагаем кнопки в 1 колонку
+    builder.adjust(1)
     return builder.as_markup() 
 
