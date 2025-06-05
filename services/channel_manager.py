@@ -5,8 +5,8 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from database.models import UserChannel, AccountReaction
 from telethon import TelegramClient
-from telethon.tl.functions.messages import GetHistoryRequest, ImportChatInviteRequest
-from telethon.tl.types import InputPeerChannel, PeerChannel
+from telethon.tl.functions.messages import GetHistoryRequest, ImportChatInviteRequest, CheckChatInviteRequest, SendReactionRequest
+from telethon.tl.types import InputPeerChannel, PeerChannel, ReactionEmoji
 from telethon.tl.functions.channels import GetFullChannelRequest, JoinChannelRequest
 from telethon.errors import (
     ChannelPrivateError,
@@ -335,6 +335,18 @@ class ChannelManager:
             return []
 
     async def set_reaction(self, client: TelegramClient, channel_id: int, post_id: int, reaction: str) -> bool:
+        """
+        Устанавливает реакцию на пост в канале.
+        
+        Args:
+            client: Telethon клиент
+            channel_id: ID канала (может быть с префиксом -100)
+            post_id: ID поста
+            reaction: Эмодзи реакции
+            
+        Returns:
+            bool: Успешно ли установлена реакция
+        """
         try:
             # Сначала проверяем, существует ли сообщение
             try:
@@ -347,9 +359,8 @@ class ChannelManager:
                     app_logger.warning(f"Сообщение {post_id} не найдено в канале {channel_id}")
                     return False
                 
-                # Если сообщение - список, берем первый элемент
                 if isinstance(msg, list):
-                    if not msg:  # Если список пустой
+                    if not msg:
                         app_logger.warning(f"Сообщение {post_id} не найдено в канале {channel_id}")
                         return False
                     msg = msg[0]
@@ -358,11 +369,13 @@ class ChannelManager:
                 return False
                 
             try:
-                await client.send_reaction(
-                    entity=channel_id,
-                    message=post_id,
-                    reaction=reaction
-                )
+                await client(SendReactionRequest(
+                    peer=channel_id,
+                    msg_id=post_id,
+                    reaction=[ReactionEmoji(emoticon=reaction)]
+                ))
+                
+                app_logger.debug(f"Установлена реакция {reaction} на пост {post_id} в канале {channel_id}")
                 return True
             except Exception as e:
                 # Проверяем на ошибку с reactions_uniq_max
@@ -375,7 +388,7 @@ class ChannelManager:
                     app_logger.error(f"Ошибка при установке реакции: {e}")
                     return False
         except Exception as e:
-            app_logger.error(f"Ошибка при установке реакции: {e}")
+            app_logger.error(f"Ошибка при установке реакции {reaction} на пост {post_id} в канале {channel_id}: {e}")
             return False
 
     async def process_channel_posts(self, channel: UserChannel, accounts: list) -> None:
@@ -495,11 +508,11 @@ class ChannelManager:
                             channel_entity = await client.get_entity(PeerChannel(channel_id))
                             
                             # Отправляем реакцию
-                            await client.send_reaction(
-                                entity=channel_entity,
-                                message=post_id,
-                                reaction=cur_reaction
-                            )
+                            await client(SendReactionRequest(
+                                peer=channel_entity,
+                                msg_id=post_id,
+                                reaction=[ReactionEmoji(emoticon=cur_reaction)]
+                            ))
                             
                             app_logger.info(f"Установлена реакция {cur_reaction} на пост {post_id} в канале {orig_channel_id} (аккаунт {account.phone})")
                             

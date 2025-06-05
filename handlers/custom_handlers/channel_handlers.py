@@ -276,6 +276,7 @@ async def process_channel(message: types.Message, state: FSMContext):
                     await state.clear()
                     return
 
+            # Получаем количество аккаунтов пользователя для установки максимального количества реакций
             account_count = await get_accounts_count_by_user(message.from_user.id)
 
             # Добавляем канал в базу
@@ -290,7 +291,7 @@ async def process_channel(message: types.Message, state: FSMContext):
             )
             
             # Логируем добавление канала
-            app_logger.info(f"Пользователь {message.from_user.id} добавил канал {channel.title} (ID: {channel.id})")
+            app_logger.info(f"Пользователь {message.from_user.full_name} добавил канал {channel.title} (ID: {channel.id})")
             
             # Сохраняем данные в состоянии
             await state.update_data(

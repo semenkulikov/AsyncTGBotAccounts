@@ -2,6 +2,7 @@ from sqlalchemy import Column, Integer, String, LargeBinary, DateTime, Boolean, 
 from sqlalchemy.ext.asyncio import AsyncAttrs, create_async_engine, AsyncSession
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from datetime import datetime
+import asyncio
 
 from config_data.config import DATABASE_URL
 
@@ -83,5 +84,27 @@ class AccountReaction(Base):
     channel = relationship("UserChannel", back_populates="reactions") 
 
 
-engine = create_async_engine(DATABASE_URL)
-async_session = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+engine = create_async_engine(
+    DATABASE_URL,
+    pool_size=5,              # Размер пула соединений
+    pool_timeout=60,          # Увеличиваем таймаут для получения соединения
+    pool_recycle=300,         # Пересоздавать соединения каждые 5 минут
+    pool_pre_ping=True,       # Проверка соединения перед использованием
+    connect_args={"check_same_thread": False}  # Разрешаем доступ из разных потоков (для SQLite)
+)
+async_session = sessionmaker(
+    engine,
+    expire_on_commit=False,
+    class_=AsyncSession, 
+    autoflush=False,          # Отключаем автоматический flush
+    autocommit=False          # Отключаем автоматический commit
+)
+
+# Функция для корректного закрытия соединений с базой данных при завершении работы
+async def close_db_connections():
+    """
+    Закрывает все соединения с базой данных.
+    Должна вызываться при завершении работы приложения.
+    """
+    await engine.dispose()
+    print("Закрыты все соединения с базой данных")

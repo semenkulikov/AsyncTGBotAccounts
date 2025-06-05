@@ -3,7 +3,7 @@ from sqlalchemy import select, and_
 from cryptography.fernet import Fernet
 import asyncio
 import random
-from datetime import datetime, UTC
+from datetime import datetime
 from telethon import TelegramClient
 from telethon.errors import SessionExpiredError, SessionPasswordNeededError, AuthKeyError, FloodWaitError, RPCError
 from telethon.sessions import StringSession
@@ -19,6 +19,41 @@ from database.query_orm import get_user_by_user_id, get_account_by_phone
 from loader import app_logger, bot
 from services.channel_manager import ChannelManager
 
+from sqlalchemy.exc import OperationalError, TimeoutError
+
+# Добавляем функцию для безопасного выполнения транзакций с повторными попытками
+async def execute_with_retry(async_func, *args, max_retries=5, retry_delay=1, **kwargs):
+    """
+    Выполняет асинхронную функцию с механизмом повторных попыток при ошибках базы данных.
+    
+    Args:
+        async_func: Асинхронная функция для выполнения
+        max_retries: Максимальное количество повторных попыток
+        retry_delay: Начальная задержка между попытками (увеличивается экспоненциально)
+        *args, **kwargs: Аргументы для передачи в async_func
+        
+    Returns:
+        Результат выполнения async_func или None в случае неудачи
+    """
+    retries = 0
+    while retries < max_retries:
+        try:
+            return await async_func(*args, **kwargs)
+        except (OperationalError, TimeoutError) as e:
+            retries += 1
+            if "database is locked" in str(e) or "connection timed out" in str(e):
+                wait_time = retry_delay * (2 ** retries)  # Экспоненциальная задержка
+                app_logger.warning(f"База данных заблокирована или таймаут соединения. Повторная попытка {retries}/{max_retries} через {wait_time} сек...")
+                await asyncio.sleep(wait_time)
+                continue
+            elif retries >= max_retries:
+                app_logger.error(f"Достигнут лимит повторных попыток ({max_retries}). Последняя ошибка: {e}")
+                return None
+            else:
+                raise
+        except Exception as e:
+            app_logger.error(f"Неожиданная ошибка при выполнении транзакции: {e}")
+            raise
 
 class AccountService:
     def __init__(self, encryption_key: str):
@@ -141,7 +176,7 @@ class AccountService:
                 account = result.scalar_one_or_none()
                 
                 if account:
-                    account.last_activity = datetime.now(UTC)
+                    account.last_activity = datetime.now()
                     await session.commit()
                     app_logger.info(f"Обновлено время активности для {phone}")
                 else:
@@ -324,7 +359,8 @@ class UserActivityManager:
         try:
             await client.connect()
         except RPCError as e:
-            # сессия вовсе не может подключиться (удалена/отозвана)
+            # сессия вовсе не может подключиться
+            app_logger.error(f"Невозможно подключиться с аккаунтом {account.phone}: {e}")
             await self._handle_invalid_session(service, account.phone, account.user_id)
             return
 
@@ -347,256 +383,269 @@ class UserActivityManager:
             # # Отправляем тестовое сообщение и удаляем его для обновления времени последнего захода
             # temp_message = await client.send_message("me", "test")
             # await client.delete_messages("me", temp_message)
+            app_logger.info(f"Запуск цикла активности для {account.phone}")
 
             # Обновляем сообщение в избранном
-            current_time = datetime.now(UTC).strftime("%d.%m.%Y %H:%M:%S")
+            current_time = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
             if messages and messages[0].text and "Аккаунт был активен" in messages[0].text:
                 await client.edit_message("me", messages[0].id, f"🔄 Аккаунт был активен: {current_time}")
             else:
                 await client.send_message("me", f"🔄 Аккаунт был активен: {current_time}")
 
-            # Получаем каналы пользователя
+            # Получаем каналы пользователя с механизмом повторных попыток
             async with async_session() as session:
-                channel_manager = ChannelManager(session)
-                user = await get_user_by_user_id(str(account.user_id))
-                channels = await channel_manager.get_user_channels(user.id)
-
-                for channel in channels:
-                    if not channel.is_active:
-                        continue
-                    try:
-                        # Получаем список доступных реакций
-                        try:
-                            available_reactions, user_reactions = await channel_manager.get_channel_reactions(
-                                channel.id
-                            )
-                        except Exception:
-                            available_reactions, user_reactions = [], []
-                        
-                        # Используем пользовательские реакции, если они установлены, иначе доступные
-                        reactions_to_use = user_reactions if user_reactions else available_reactions
-                        
-                        # Если нет реакций, пропускаем канал
-                        if not reactions_to_use:
-                            app_logger.warning(f"Нет доступных реакций для канала {channel.channel_title}")
-                            continue
-                        
-                        # Получаем канал из Telegram
-                        # Извлекаем ID канала без префикса -100
-                        orig_channel_id = channel.channel_id
-                        if str(orig_channel_id).startswith('-100'):
-                            channel_id = int(str(abs(orig_channel_id))[3:])
-                        else:
-                            channel_id = abs(orig_channel_id)
-                        
-                        # Проверяем новые посты для этого аккаунта
-                        new_posts = await channel_manager.check_new_posts(channel, client, account.id)
-                        
-                        if new_posts:
-                            app_logger.info(f"Найдено {len(new_posts)} новых постов в канале {channel.channel_title}")
+                
+                    channel_manager = ChannelManager(session)
+                    user = await execute_with_retry(get_user_by_user_id, str(account.user_id))
+                    try: 
+                        if not user:
+                            app_logger.error(f"Не удалось получить пользователя {account.user_id}")
+                            return
                             
-                            for post_id in new_posts:
-                                # Проверяем, не помечен ли уже этот пост как имеющий максимум реакций
-                                max_reactions_query = select(AccountReaction).where(
-                                    AccountReaction.channel_id == channel.id,
-                                    AccountReaction.post_id == post_id,
-                                    AccountReaction.reaction == "__max_reactions__"
+                        channels = await execute_with_retry(channel_manager.get_user_channels, user.id)
+                        
+                        if channels is None:
+                            app_logger.error(f"Не удалось получить каналы пользователя {user.username}")
+                            return
+                        
+                        app_logger.debug(f"Найдено {len(channels)} каналов для пользователя {user.username}")
+
+                        for channel in channels:
+                            app_logger.info(f"Проверка канала {channel.channel_title}")
+                            if not channel.is_active:
+                                continue
+                            try:
+                                # Получаем список доступных реакций с повторными попытками
+                                reaction_result = await execute_with_retry(
+                                    channel_manager.get_channel_reactions,
+                                    channel.id
                                 )
-                                max_reactions_result = await session.execute(max_reactions_query)
-                                max_reactions_record = max_reactions_result.scalar_one_or_none()
+                                available_reactions, user_reactions = reaction_result
+                            except Exception:
+                                available_reactions, user_reactions = [], []
+                            
+                            # Используем пользовательские реакции, если они установлены, иначе доступные
+                            reactions_to_use = user_reactions if user_reactions else available_reactions
+                            
+                            # Если нет реакций, пропускаем канал
+                            if not reactions_to_use:
+                                app_logger.warning(f"Нет доступных реакций для канала {channel.channel_title}")
+                                continue
+                            
+                            # Получаем канал из Telegram
+                            # Извлекаем ID канала без префикса -100
+                            orig_channel_id = channel.channel_id
+                            if str(orig_channel_id).startswith('-100'):
+                                channel_id = int(str(abs(orig_channel_id))[3:])
+                            else:
+                                channel_id = abs(orig_channel_id)
+                            
+                            # Проверяем новые посты для этого аккаунта
+                            new_posts = await channel_manager.check_new_posts(channel, client, account.id)
+                            
+                            if new_posts:
+                                app_logger.info(f"Найдено {len(new_posts)} новых постов в канале {channel.channel_title}")
                                 
-                                if max_reactions_record:
-                                    app_logger.debug(f"Пост {post_id} в канале {channel.channel_title} уже помечен как имеющий максимум реакций. Пропускаем.")
-                                    continue
-                                
-                                try:
-                                    # Сначала проверяем, существует ли сообщение
-                                    msg = await client.get_messages(
-                                        entity=channel.channel_id,
-                                        ids=post_id
+                                for post_id in new_posts:
+                                    # Проверяем, не помечен ли уже этот пост как имеющий максимум реакций
+                                    max_reactions_query = select(AccountReaction).where(
+                                        AccountReaction.channel_id == channel.id,
+                                        AccountReaction.post_id == post_id,
+                                        AccountReaction.reaction == "__max_reactions__"
                                     )
+                                    max_reactions_result = await session.execute(max_reactions_query)
+                                    max_reactions_record = max_reactions_result.scalar_one_or_none()
                                     
-                                    if not msg or not isinstance(msg, list) and not msg:
-                                        app_logger.warning(f"Сообщение {post_id} не найдено в канале {channel.channel_title}")
+                                    if max_reactions_record:
+                                        app_logger.debug(f"Пост {post_id} в канале {channel.channel_title} уже помечен как имеющий максимум реакций. Пропускаем.")
                                         continue
                                     
-                                    # Если сообщение - список, берем первый элемент
-                                    if isinstance(msg, list):
-                                        if not msg:  # Если список пустой
+                                    try:
+                                        # Сначала проверяем, существует ли сообщение
+                                        msg = await client.get_messages(
+                                            entity=channel.channel_id,
+                                            ids=post_id
+                                        )
+                                        
+                                        if not msg or not isinstance(msg, list) and not msg:
                                             app_logger.warning(f"Сообщение {post_id} не найдено в канале {channel.channel_title}")
                                             continue
-                                        msg = msg[0]
-                                    
-                                    # Проверяем, сколько просмотров у поста
-                                    try:
-                                        views_resp = await client(GetMessagesViewsRequest(
-                                            peer=channel.channel_id,
-                                            id=[post_id],
-                                            increment=False
-                                        ))
-                                        views_count = views_resp.views[0].views or 0
                                         
-                                        # Инкрементируем счетчик просмотров, если нужно
-                                        if int(views_count) < channel.views:
-                                            await client(GetMessagesViewsRequest(
+                                        # Если сообщение - список, берем первый элемент
+                                        if isinstance(msg, list):
+                                            if not msg:  # Если список пустой
+                                                app_logger.warning(f"Сообщение {post_id} не найдено в канале {channel.channel_title}")
+                                                continue
+                                            msg = msg[0]
+                                        
+                                        # Проверяем, сколько просмотров у поста
+                                        try:
+                                            views_resp = await client(GetMessagesViewsRequest(
                                                 peer=channel.channel_id,
                                                 id=[post_id],
-                                                increment=True
+                                                increment=False
                                             ))
-                                    except Exception as e:
-                                        app_logger.error(f"Ошибка при получении/установке просмотров для поста {post_id}: {e}")
-                                    
-                                    # Проверяем текущее количество реакций на посте
-                                    current_reactions_count = 0
-                                    if msg.reactions:
-                                        current_reactions_count = sum(r.count for r in msg.reactions.results)
-                
-                                    # Проверяем, не превышен ли максимум реакций
-                                    if current_reactions_count >= channel.max_reactions:
-                                        app_logger.warning(
-                                            f"Пост {post_id} в канале {channel.channel_title} уже имеет {current_reactions_count} "
-                                            f"реакций (максимум: {channel.max_reactions})"
-                                        )
-                                        
-                                        # Добавляем запись, что этот пост уже проверен и имеет максимум реакций
-                                        # чтобы больше не проверять его в будущем
-                                        max_reaction_record = AccountReaction(
-                                            account_id=account.id,
-                                            channel_id=channel.id,
-                                            post_id=post_id,
-                                            reaction="__max_reactions__"  # Специальный маркер для постов с максимумом реакций
-                                        )
-                                        session.add(max_reaction_record)
-                                        
-                                        await session.commit()
-                                        continue
-                                    
-                                    # Проверяем, не выставлял ли уже этот аккаунт реакцию на этот пост
-                                    query = select(AccountReaction).where(
-                                        AccountReaction.account_id == account.id,
-                                        AccountReaction.channel_id == channel.id,
-                                        AccountReaction.post_id == post_id
-                                    )
-                                    result = await session.execute(query)
-                                    existing_reaction = result.scalar_one_or_none()
-                                    
-                                    if existing_reaction:
-                                        app_logger.debug(
-                                            f"Аккаунт {account.phone} уже ставил реакцию на пост {post_id} в канале {channel.channel_title}"
-                                        )
-                                        continue
-                                    
-                                    # Выбираем случайную реакцию из доступных
-                                    reaction_emoji = random.choice(reactions_to_use)
-                                    
-                                    try:
-                                        # Получаем entity канала
-                                        try:
-                                            channel_entity = await client.get_entity(channel.channel_id)
+                                            views_count = views_resp.views[0].views or 0
+                                            
+                                            # Инкрементируем счетчик просмотров, если нужно
+                                            if int(views_count) < channel.views:
+                                                await client(GetMessagesViewsRequest(
+                                                    peer=channel.channel_id,
+                                                    id=[post_id],
+                                                    increment=True
+                                                ))
                                         except Exception as e:
-                                            app_logger.error(f"Не удалось получить entity канала {channel.channel_title}: {e}")
-                                            continue
+                                            app_logger.error(f"Ошибка при получении/установке просмотров для поста {post_id}: {e}")
+                                        
+                                        # Проверяем текущее количество реакций на посте
+                                        current_reactions_count = 0
+                                        if msg.reactions:
+                                            current_reactions_count = sum(r.count for r in msg.reactions.results)
+                    
+                                        # Проверяем, не превышен ли максимум реакций
+                                        if current_reactions_count >= channel.max_reactions:
+                                            app_logger.warning(
+                                                f"Пост {post_id} в канале {channel.channel_title} уже имеет {current_reactions_count} "
+                                                f"реакций (максимум: {channel.max_reactions})"
+                                            )
                                             
-                                        # Устанавливаем реакцию
-                                        try:
-                                            await client(SendReactionRequest(
-                                                peer=channel.channel_id,
-                                                msg_id=post_id,
-                                                reaction=[ReactionEmoji(emoticon=reaction_emoji)]
-                                            ))
-                                            
-                                            # Записываем информацию о выставленной реакции
-                                            reaction_record = AccountReaction(
+                                            # Добавляем запись, что этот пост уже проверен и имеет максимум реакций
+                                            # чтобы больше не проверять его в будущем
+                                            max_reaction_record = AccountReaction(
                                                 account_id=account.id,
                                                 channel_id=channel.id,
                                                 post_id=post_id,
-                                                reaction=reaction_emoji
+                                                reaction="__max_reactions__"  # Специальный маркер для постов с максимумом реакций
                                             )
-                                            session.add(reaction_record)
+                                            session.add(max_reaction_record)
+                                            
                                             await session.commit()
-                                            
+                                            continue
+                                        
+                                        # Проверяем, не выставлял ли уже этот аккаунт реакцию на этот пост
+                                        query = select(AccountReaction).where(
+                                            AccountReaction.account_id == account.id,
+                                            AccountReaction.channel_id == channel.id,
+                                            AccountReaction.post_id == post_id
+                                        )
+                                        result = await session.execute(query)
+                                        existing_reaction = result.scalar_one_or_none()
+                                        
+                                        if existing_reaction:
                                             app_logger.debug(
-                                                f"Установлена реакция {reaction_emoji} на пост {post_id} в канале {channel.channel_title}"
+                                                f"Аккаунт {account.phone} уже ставил реакцию на пост {post_id} в канале {channel.channel_title}"
                                             )
-                                            
-                                            # Небольшая задержка между реакциями для естественности
-                                            await asyncio.sleep(random.uniform(1, 3))
-                                        except Exception as e:
-                                            # Проверяем на ошибку с reactions_uniq_max
-                                            if "reactions_uniq_max" in str(e):
-                                                app_logger.warning(f"Невозможно добавить новый тип эмодзи {reaction_emoji}, достигнут лимит уникальных реакций для поста {post_id}")
+                                            continue
+                                        
+                                        # Выбираем случайную реакцию из доступных
+                                        reaction_emoji = random.choice(reactions_to_use)
+                                        
+                                        try:
+                                            # Получаем entity канала
+                                            try:
+                                                channel_entity = await client.get_entity(channel.channel_id)
+                                            except Exception as e:
+                                                app_logger.error(f"Не удалось получить entity канала {channel.channel_title}: {e}")
+                                                continue
                                                 
-                                                # Пробуем использовать уже существующие реакции
-                                                if msg.reactions and msg.reactions.results:
-                                                    # Получаем список существующих реакций на сообщении
-                                                    existing_emoji = [r.reaction.emoticon for r in msg.reactions.results if hasattr(r.reaction, 'emoticon')]
-                                                    if existing_emoji:
-                                                        # Используем случайную из уже существующих реакций
-                                                        existing_reaction_emoji = random.choice(existing_emoji)
-                                                        try:
-                                                            await client(SendReactionRequest(
-                                                                peer=channel.channel_id,
-                                                                msg_id=post_id,
-                                                                reaction=[ReactionEmoji(emoticon=existing_reaction_emoji)]
-                                                            ))
-                                                            
-                                                            # Записываем информацию о выставленной реакции
-                                                            reaction_record = AccountReaction(
-                                                                account_id=account.id,
-                                                                channel_id=channel.id,
-                                                                post_id=post_id,
-                                                                reaction=existing_reaction_emoji
-                                                            )
-                                                            session.add(reaction_record)
-                                                            await session.commit()
-                                                            
-                                                            app_logger.debug(
-                                                                f"Установлена существующая реакция {existing_reaction_emoji} на пост {post_id} в канале {channel.channel_title}"
-                                                            )
-                                                            
-                                                            # Небольшая задержка между реакциями для естественности
-                                                            await asyncio.sleep(random.uniform(1, 3))
-                                                        except Exception as e2:
-                                                            app_logger.error(f"Ошибка при установке существующей реакции {existing_reaction_emoji}: {e2}")
-                                            else:
-                                                # Для других ошибок
-                                                if "message ID is invalid" in str(e):
-                                                    app_logger.warning(f"Пост {post_id} в канале {channel.channel_title} недоступен или был удален")
-                                                    # Добавляем запись, чтобы больше не пытаться ставить реакцию на этот пост
-                                                    invalid_post_record = AccountReaction(
-                                                        account_id=account.id,
-                                                        channel_id=channel.id,
-                                                        post_id=post_id,
-                                                        reaction="__invalid_post__"  # Специальный маркер для недоступных постов
-                                                    )
-                                                    session.add(invalid_post_record)
-                                                    await session.commit()
+                                            # Устанавливаем реакцию
+                                            try:
+                                                await client(SendReactionRequest(
+                                                    peer=channel.channel_id,
+                                                    msg_id=post_id,
+                                                    reaction=[ReactionEmoji(emoticon=reaction_emoji)]
+                                                ))
+                                                
+                                                # Записываем информацию о выставленной реакции
+                                                reaction_record = AccountReaction(
+                                                    account_id=account.id,
+                                                    channel_id=channel.id,
+                                                    post_id=post_id,
+                                                    reaction=reaction_emoji
+                                                )
+                                                session.add(reaction_record)
+                                                await session.commit()
+                                                
+                                                app_logger.debug(
+                                                    f"Установлена реакция {reaction_emoji} на пост {post_id} в канале {channel.channel_title}"
+                                                )
+                                                
+                                                # Небольшая задержка между реакциями для естественности
+                                                await asyncio.sleep(random.uniform(1, 3))
+                                            except Exception as e:
+                                                # Проверяем на ошибку с reactions_uniq_max
+                                                if "reactions_uniq_max" in str(e):
+                                                    app_logger.warning(f"Невозможно добавить новый тип эмодзи {reaction_emoji}, достигнут лимит уникальных реакций для поста {post_id}")
+                                                    
+                                                    # Пробуем использовать уже существующие реакции
+                                                    if msg.reactions and msg.reactions.results:
+                                                        # Получаем список существующих реакций на сообщении
+                                                        existing_emoji = [r.reaction.emoticon for r in msg.reactions.results if hasattr(r.reaction, 'emoticon')]
+                                                        if existing_emoji:
+                                                            # Используем случайную из уже существующих реакций
+                                                            existing_reaction_emoji = random.choice(existing_emoji)
+                                                            try:
+                                                                await client(SendReactionRequest(
+                                                                    peer=channel.channel_id,
+                                                                    msg_id=post_id,
+                                                                    reaction=[ReactionEmoji(emoticon=existing_reaction_emoji)]
+                                                                ))
+                                                                
+                                                                # Записываем информацию о выставленной реакции
+                                                                reaction_record = AccountReaction(
+                                                                    account_id=account.id,
+                                                                    channel_id=channel.id,
+                                                                    post_id=post_id,
+                                                                    reaction=existing_reaction_emoji
+                                                                )
+                                                                session.add(reaction_record)
+                                                                await session.commit()
+                                                                
+                                                                app_logger.debug(
+                                                                    f"Установлена существующая реакция {existing_reaction_emoji} на пост {post_id} в канале {channel.channel_title}"
+                                                                )
+                                                                
+                                                                # Небольшая задержка между реакциями для естественности
+                                                                await asyncio.sleep(random.uniform(1, 3))
+                                                            except Exception as e2:
+                                                                app_logger.error(f"Ошибка при установке существующей реакции {existing_reaction_emoji}: {e2}")
                                                 else:
-                                                    app_logger.error(f"Ошибка при отправке реакции {reaction_emoji} на пост {post_id} в канале {channel.channel_title}: {e}")
+                                                    # Для других ошибок
+                                                    if "message ID is invalid" in str(e):
+                                                        app_logger.warning(f"Пост {post_id} в канале {channel.channel_title} недоступен или был удален")
+                                                        # Добавляем запись, чтобы больше не пытаться ставить реакцию на этот пост
+                                                        invalid_post_record = AccountReaction(
+                                                            account_id=account.id,
+                                                            channel_id=channel.id,
+                                                            post_id=post_id,
+                                                            reaction="__invalid_post__"  # Специальный маркер для недоступных постов
+                                                        )
+                                                        session.add(invalid_post_record)
+                                                        await session.commit()
+                                                    else:
+                                                        app_logger.error(f"Ошибка при отправке реакции {reaction_emoji} на пост {post_id} в канале {channel.channel_title}: {e}")
+                                        except Exception as e:
+                                            app_logger.error(f"Ошибка при отправке реакции на пост {post_id} в канале {channel.channel_title}: {e}")
                                     except Exception as e:
-                                        app_logger.error(f"Ошибка при отправке реакции на пост {post_id} в канале {channel.channel_title}: {e}")
-                                except Exception as e:
-                                    app_logger.error(f"Ошибка при обработке поста {post_id} в канале {channel.channel_title}: {e}")
-                        
-                        # Обновляем время последней проверки в контексте этого аккаунта
-                        # но НЕ в общем, чтобы другие аккаунты тоже могли проверить посты
-                        # и поставить свои реакции
-                        try:
-                            last_check_record = AccountReaction(
-                                account_id=account.id,
-                                channel_id=channel.id,
-                                post_id=0,  # Специальное значение для маркера последней проверки
-                                reaction="__last_checked__"  # Маркер для отслеживания последней проверки
-                            )
-                            session.add(last_check_record)
-                            await session.commit()
-                        except Exception as e:
-                            app_logger.error(f"Ошибка при обновлении времени последней проверки для канала {channel.channel_title}: {e}")
+                                        app_logger.error(f"Ошибка при обработке поста {post_id} в канале {channel.channel_title}: {e}")
+                            
+                            # Обновляем время последней проверки в контексте этого аккаунта
+                            # но НЕ в общем, чтобы другие аккаунты тоже могли проверить посты
+                            # и поставить свои реакции
+                            try:
+                                last_check_record = AccountReaction(
+                                    account_id=account.id,
+                                    channel_id=channel.id,
+                                    post_id=0,  # Специальное значение для маркера последней проверки
+                                    reaction="__last_checked__"  # Маркер для отслеживания последней проверки
+                                )
+                                session.add(last_check_record)
+                                await session.commit()
+                            except Exception as e:
+                                app_logger.error(f"Ошибка при обновлении времени последней проверки для канала {channel.channel_title}: {e}")
 
                     except Exception as e:
-                        app_logger.error(f"Ошибка при проверке канала {channel.channel_id}: {e}")
-                        await session.rollback()
-                        continue
+                        app_logger.error(f"Ошибка при проверке каналов для пользователя {user.username}: {e}")
 
             await service.update_last_active(account.phone)
 
