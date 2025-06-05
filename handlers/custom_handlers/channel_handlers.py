@@ -153,155 +153,128 @@ async def process_channel(message: types.Message, state: FSMContext):
                 await state.clear()
                 return
                 
-            # Берем первый активный аккаунт
-            account = accounts[0]
-            
-            if channel_link.startswith('@'):
-                channel_username = channel_link[1:]
-            else:
-                channel_username = channel_link.split('/')[-1]
+            # Берем все аккаунты пользователя и присоединяемся к каналу
+            for account in accounts:
+                
+                if channel_link.startswith('@'):
+                    channel_username = channel_link[1:]
+                else:
+                    channel_username = channel_link.split('/')[-1]
 
-            # Получаем информацию о канале через Telethon используя аккаунт пользователя
-            try:
-                session_str = await service.decrypt_session(account.session)
-                
-                # Создаем новый event loop для Telethon
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                
-                client = TelegramClient(
-                    session=StringSession(session_str),
-                    api_id=API_ID,
-                    api_hash=API_HASH,
-                    connection=ConnectionTcpAbridged,
-                    device_model="Samsung S24 Ultra",
-                    app_version="10.2.0",
-                    system_version="Android 14",
-                    lang_code="en",
-                    system_lang_code="en-US",
-                    timeout=30,
-                    auto_reconnect=False,
-                    loop=loop
-                )
-                
-                await client.connect()
-                
+                # Получаем информацию о канале через Telethon используя аккаунт пользователя
                 try:
-                    # Обработка открытых и закрытых каналов
-                    if "+" in channel_username:
-                        invite = await client(CheckChatInviteRequest(channel_username[1:]))
+                    session_str = await service.decrypt_session(account.session)
+                    
+                    # Создаем новый event loop для Telethon
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    
+                    client = TelegramClient(
+                        session=StringSession(session_str),
+                        api_id=API_ID,
+                        api_hash=API_HASH,
+                        connection=ConnectionTcpAbridged,
+                        device_model="Samsung S24 Ultra",
+                        app_version="10.2.0",
+                        system_version="Android 14",
+                        lang_code="en",
+                        system_lang_code="en-US",
+                        timeout=30,
+                        auto_reconnect=False,
+                        loop=loop
+                    )
+                    
+                    await client.connect()
+                    
+                    try:
+                        # Обработка открытых и закрытых каналов
+                        if "+" in channel_username:
+                            invite = await client(CheckChatInviteRequest(channel_username[1:]))
 
-                        if isinstance(invite, ChatInviteAlready):
-                            # Аккаунт уже в канале, получаем полные данные
-                            channel = await client.get_entity(invite.chat.id)
-                            full_channel = await client(GetFullChannelRequest(channel))
-                        else:
-                            # Присоединяемся к каналу
-                            try:
-                                # Пытаемся присоединиться к каналу
-                                result = await client(ImportChatInviteRequest(channel_username[1:]))
-                                if hasattr(result, 'chats') and result.chats:
-                                    channel = result.chats[0]
-                                    full_channel = await client(GetFullChannelRequest(channel))
-                                    
-                                    # Подписываемся на канал и отключаем уведомления
-                                    try:
-                                        await client(JoinChannelRequest(channel))
-                                        app_logger.info(f"Успешно подписались на канал {channel.title}")
+                            if isinstance(invite, ChatInviteAlready):
+                                # Аккаунт уже в канале, получаем полные данные
+                                channel = await client.get_entity(invite.chat.id)
+                                full_channel = await client(GetFullChannelRequest(channel))
+                            else:
+                                # Присоединяемся к каналу
+                                try:
+                                    # Пытаемся присоединиться к каналу
+                                    result = await client(ImportChatInviteRequest(channel_username[1:]))
+                                    if hasattr(result, 'chats') and result.chats:
+                                        channel = result.chats[0]
+                                        full_channel = await client(GetFullChannelRequest(channel))
                                         
-                                        # Полностью отключаем уведомления
-                                        from telethon.tl.functions.account import UpdateNotifySettingsRequest
-                                        from telethon.tl.types import InputPeerNotifySettings, InputNotifyPeer
-                                        
-                                        # Создаем настройки с полностью выключенными уведомлениями
-                                        settings = InputPeerNotifySettings(
-                                            show_previews=False,
-                                            silent=True,
-                                            mute_until=2147483647,  # Максимальное значение времени
-                                            sound=None              # Отключаем звук
-                                        )
-                                        
-                                        # Применяем настройки к каналу
-                                        await client(UpdateNotifySettingsRequest(
-                                            peer=InputNotifyPeer(peer=channel),
-                                            settings=settings
-                                        ))
-                                        
-                                        app_logger.info(f"Успешно отключили уведомления для канала {channel.title}")
-                                    except Exception as e:
-                                        app_logger.error(f"Ошибка при подписке на канал или отключении уведомлений: {e}")
-                                else:
-                                    await message.answer("Не удалось присоединиться к закрытому каналу!")
+                                        # Подписываемся на канал и отключаем уведомления
+                                        try:
+                                            await client(JoinChannelRequest(channel))
+                                            app_logger.info(f"Успешно подписались на канал {channel.title} с аккаунта {account.phone}")
+                                            
+                                            # Полностью отключаем уведомления
+                                            from telethon.tl.functions.account import UpdateNotifySettingsRequest
+                                            from telethon.tl.types import InputPeerNotifySettings, InputNotifyPeer
+                                            
+                                            # Создаем настройки с полностью выключенными уведомлениями
+                                            settings = InputPeerNotifySettings(
+                                                show_previews=False,
+                                                silent=True,
+                                                mute_until=2147483647,  # Максимальное значение времени
+                                                sound=None              # Отключаем звук
+                                            )
+                                            
+                                            # Применяем настройки к каналу
+                                            await client(UpdateNotifySettingsRequest(
+                                                peer=InputNotifyPeer(peer=channel),
+                                                settings=settings
+                                            ))
+                                            
+                                            app_logger.info(f"Успешно отключили уведомления для канала {channel.title} с аккаунта {account.phone}")
+                                        except Exception as e:
+                                            app_logger.error(f"Ошибка при подписке на канал или отключении уведомлений: {e} с аккаунта {account.phone}")
+                                    else:
+                                        await message.answer(f"Не удалось присоединиться к закрытому каналу с аккаунта {account.phone}!")
+                                        return
+                                except Exception as e:
+                                    app_logger.error(f"Ошибка при присоединении к закрытому каналу: {e} с аккаунта {account.phone}")
+                                    await message.answer(f"Ошибка при присоединении к закрытому каналу с аккаунта {account.phone}!")
                                     return
-                            except Exception as e:
-                                app_logger.error(f"Ошибка при присоединении к закрытому каналу: {e}")
-                                await message.answer("Ошибка при присоединении к закрытому каналу!")
-                                return
-                    else:
-                        channel = await client.get_entity(channel_username)
-                        full_channel = await client(GetFullChannelRequest(channel))
+                        else:  # Если канал публичный - не присоединяемся к каналу
+                            channel = await client.get_entity(channel_username)
+                            full_channel = await client(GetFullChannelRequest(channel))
+                            
+                            # Не подписываемся на публичные каналы, так как они доступны и без подписки
+                            app_logger.info(f"Публичный канал {channel.title} добавлен без подписки (аккаунт {account.phone})")
+
+                        # Обработка ситуации уже добавленного канала
+                        if channel.title in user_channels:
+                            await message.answer(f"Канал {channel.title} уже добавлен!")
+                            return
+
+                        available_reactions = []
                         
-                        # Подписываемся на канал и отключаем уведомления
-                        """
-                        try:
-                            # Пытаемся присоединиться к каналу
-                            await client(JoinChannelRequest(channel))
-                            app_logger.info(f"Успешно подписались на канал {channel.title}")
-                            
-                            # Полностью отключаем уведомления
-                            from telethon.tl.functions.account import UpdateNotifySettingsRequest
-                            from telethon.tl.types import InputPeerNotifySettings, InputNotifyPeer
-                            
-                            # Создаем настройки с полностью выключенными уведомлениями
-                            settings = InputPeerNotifySettings(
-                                show_previews=False,
-                                silent=True,
-                                mute_until=2147483647,  # Максимальное значение времени
-                                sound=None              # Отключаем звук
-                            )
-                            
-                            # Применяем настройки к каналу
-                            await client(UpdateNotifySettingsRequest(
-                                peer=InputNotifyPeer(peer=channel),
-                                settings=settings
-                            ))
-                            
-                            app_logger.info(f"Успешно отключили уведомления для канала {channel.title}")
-                        except Exception as e:
-                            app_logger.error(f"Ошибка при подписке на канал или отключении уведомлений: {e}")
-                        """
-
-                    # Обработка ситуации уже добавленного канала
-                    if channel.title in user_channels:
-                        await message.answer("Такой канал уже добавлен!")
-                        return
-
-                    available_reactions = []
-                    
-                    if hasattr(full_channel.full_chat.available_reactions, 'reactions'):
-                        reactions = full_channel.full_chat.available_reactions.reactions
-                        if isinstance(reactions, list):
-                            # Преобразуем ReactionEmoji в строки
-                            available_reactions = []
-                            for r in reactions:
-                                if isinstance(r, ReactionEmoji):
-                                    available_reactions.append(str(r.emoticon))
-                    else:
-                        default_reactions = ["👍", "❤", "👏", "🎉", "🤩", "👌", "😍",
-                                             "❤", "💯", "🤣", "⚡", "🏆", "🤝", "✍"]
-                        available_reactions = default_reactions
-                finally:
-                    await client.disconnect()
-                    loop.close()
-                    
-            except Exception as e:
-                app_logger.error(f"Ошибка получения информации о канале: {e}")
-                await message.answer(
-                    "Не удалось получить информацию о канале. Попробуйте позже",
-                    reply_markup=get_channels_keyboard()
-                )
-                await state.clear()
-                return
+                        if hasattr(full_channel.full_chat.available_reactions, 'reactions'):
+                            reactions = full_channel.full_chat.available_reactions.reactions
+                            if isinstance(reactions, list):
+                                # Преобразуем ReactionEmoji в строки
+                                available_reactions = []
+                                for r in reactions:
+                                    if isinstance(r, ReactionEmoji):
+                                        available_reactions.append(str(r.emoticon))
+                        else:
+                            default_reactions = ["👍", "❤", "👏", "🎉", "🤩", "👌", "😍",
+                                                "❤", "💯", "🤣", "⚡", "🏆", "🤝", "✍"]
+                            available_reactions = default_reactions
+                    finally:
+                        await client.disconnect()
+                        loop.close()
+                
+                except Exception as e:
+                    app_logger.error(f"Ошибка получения информации о канале: {e}")
+                    await message.answer(
+                        "Не удалось получить информацию о канале. Попробуйте позже",
+                        reply_markup=get_channels_keyboard()
+                    )
+                    await state.clear()
+                    return
 
             account_count = await get_accounts_count_by_user(message.from_user.id)
 

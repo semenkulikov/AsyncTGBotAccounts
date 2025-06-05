@@ -20,6 +20,9 @@ import asyncio
 from loader import app_logger
 from database.query_orm import get_user_by_user_id
 
+# Для решения циклического импорта используем глобальную переменную
+account_service = None
+
 class ChannelManager:
     def __init__(self, session: AsyncSession):
         self.session = session
@@ -182,14 +185,36 @@ class ChannelManager:
                         except UserAlreadyParticipantError:
                             app_logger.debug(f"Уже участник канала с хэшем {invite_hash}")
                         except Exception as e:
-                            app_logger.error(f"Ошибка при подключении к каналу: {e}")
+                            # Если ссылка-приглашение истекла/недействительна, деактивируем канал
+                            if "expired" in str(e).lower() or "invalid" in str(e).lower():
+                                app_logger.error(f"Ссылка-приглашение для канала {channel.channel_title} недействительна: {e}")
+                                # Деактивируем канал
+                                channel.is_active = False
+                                await self.session.commit()
+                                app_logger.info(f"Канал {channel.channel_title} автоматически деактивирован из-за недействительной ссылки")
+                            else:
+                                app_logger.error(f"Ошибка при подключении к каналу {channel.channel_title}: {e}")
                     
-                    # Пробуем получить сущность канала
-                    peer = await client.get_entity(channel.channel_username)
-                    app_logger.debug(f"Канал получен по юзернейму: {channel.channel_username}")
+                    # Для публичных каналов пробуем несколько способов получения
+                    try:
+                        # Сначала стандартный способ
+                        peer = await client.get_entity(channel.channel_username)
+                        app_logger.debug(f"Канал получен по юзернейму: {channel.channel_username}")
+                    except Exception as e:
+                        app_logger.debug(f"Не удалось получить канал стандартным способом: {e}")
+                        
+                        # Пробуем через t.me/
+                        try:
+                            peer = await client.get_entity(f"t.me/{channel.channel_username}")
+                            app_logger.debug(f"Канал получен через t.me/: {channel.channel_username}")
+                        except Exception as e2:
+                            app_logger.debug(f"Не удалось получить канал через t.me/: {e2}")
+                            
+                            # Для публичных каналов не подписываемся, так как реакции и просмотры можно ставить без подписки
+                            app_logger.debug(f"Не пытаемся подписываться на публичный канал: {channel.channel_username}")
                 except Exception as e:
                     app_logger.debug(f"Не удалось получить канал по юзернейму: {e}")
-                    
+            
             # Если не удалось получить по юзернейму или его нет, пробуем искать в диалогах
             if not peer:
                 try:
@@ -234,9 +259,13 @@ class ChannelManager:
                         except Exception as e:
                             app_logger.debug(f"Не удалось получить через GetFullChannelRequest: {e}")
             
-            # Если все попытки не удались, выходим
+            # Если все попытки не удались, выходим и деактивируем канал
             if not peer:
                 app_logger.warning(f"Не удалось найти канал {orig_channel_id}")
+                # Если не удалось найти канал после всех попыток, деактивируем его
+                channel.is_active = False
+                await self.session.commit()
+                app_logger.info(f"Канал {channel.channel_title} автоматически деактивирован, так как не удалось его найти")
                 return []
             
             # Получаем сообщения
@@ -267,8 +296,17 @@ class ChannelManager:
                         result = await self.session.execute(query)
                         existing_reaction = result.scalar_one_or_none()
                         
-                        # Если реакции от этого аккаунта еще нет, добавляем пост в список новых
-                        if not existing_reaction:
+                        # Также проверяем, не достигнут ли максимум реакций для этого поста
+                        max_reactions_query = select(AccountReaction).where(
+                            AccountReaction.channel_id == channel.id,
+                            AccountReaction.post_id == message.id,
+                            AccountReaction.reaction == "__max_reactions__"
+                        )
+                        max_reactions_result = await self.session.execute(max_reactions_query)
+                        max_reactions_record = max_reactions_result.scalar_one_or_none()
+                        
+                        # Если реакции от этого аккаунта еще нет и пост не имеет макс. количество реакций
+                        if not existing_reaction and not max_reactions_record:
                             new_post_ids.append(message.id)
                     else:
                         # Если ID аккаунта не указан, просто добавляем пост
@@ -281,25 +319,114 @@ class ChannelManager:
                 await self.session.commit()
             
             if new_post_ids:  # Логируем только если есть новые сообщения
-                app_logger.info(f"Найдено {len(new_post_ids)} новых сообщений в канале {orig_channel_id}")
+                app_logger.info(f"Найдено {len(new_post_ids)} новых сообщений в канале {channel.channel_title}")
             return new_post_ids
         except Exception as e:
-            app_logger.error(f"Ошибка при проверке постов канала {channel.channel_id}: {e}")
+            app_logger.error(f"Ошибка при проверке постов канала {channel.channel_title}: {e}")
+            # Если канал деактивирован или недоступен, не нужно пытаться работать с ним
+            if not channel.is_active:
+                return []
+            try:
+                # Обновляем время последней проверки даже при ошибке
+                channel.last_checked = datetime.now(UTC)
+                await self.session.commit()
+            except Exception as commit_error:
+                app_logger.error(f"Ошибка при обновлении времени проверки: {commit_error}")
             return []
 
     async def set_reaction(self, client: TelegramClient, channel_id: int, post_id: int, reaction: str) -> bool:
         try:
-            await client.send_reaction(
-                entity=channel_id,
-                message=post_id,
-                reaction=reaction
-            )
-            return True
+            # Сначала проверяем, существует ли сообщение
+            try:
+                msg = await client.get_messages(
+                    entity=channel_id,
+                    ids=post_id
+                )
+                
+                if not msg or not isinstance(msg, list) and not msg:
+                    app_logger.warning(f"Сообщение {post_id} не найдено в канале {channel_id}")
+                    return False
+                
+                # Если сообщение - список, берем первый элемент
+                if isinstance(msg, list):
+                    if not msg:  # Если список пустой
+                        app_logger.warning(f"Сообщение {post_id} не найдено в канале {channel_id}")
+                        return False
+                    msg = msg[0]
+            except Exception as e:
+                app_logger.error(f"Ошибка при проверке существования сообщения {post_id} в канале {channel_id}: {e}")
+                return False
+                
+            try:
+                await client.send_reaction(
+                    entity=channel_id,
+                    message=post_id,
+                    reaction=reaction
+                )
+                return True
+            except Exception as e:
+                # Проверяем на ошибку с reactions_uniq_max
+                if "reactions_uniq_max" in str(e):
+                    app_logger.warning(f"Невозможно добавить новый тип эмодзи, достигнут лимит уникальных реакций для поста {post_id}")
+                    # Пост уже имеет максимальное количество различных типов реакций
+                    # Возвращаем True, чтобы не считать это ошибкой
+                    return True
+                else:
+                    app_logger.error(f"Ошибка при установке реакции: {e}")
+                    return False
         except Exception as e:
-            print(f"Error setting reaction: {e}")
+            app_logger.error(f"Ошибка при установке реакции: {e}")
             return False
 
     async def process_channel_posts(self, channel: UserChannel, accounts: list) -> None:
+        # Проверяем, активен ли канал перед обработкой
+        if not channel.is_active:
+            app_logger.debug(f"Канал {channel.channel_title} неактивен, пропускаем его")
+            return
+            
+        # Проверяем существование канала в Telegram, прежде чем обрабатывать
+        try:
+            # Используем первый активный аккаунт для проверки
+            for account in accounts:
+                if account.is_active:
+                    global account_service
+                    if account_service:
+                        try:
+                            session_str = await account_service.decrypt_session(account.session)
+                            async with TelegramClient(
+                                f'temp_session_{channel.id}',
+                                API_ID,
+                                API_HASH
+                            ) as test_client:
+                                try:
+                                    # Пытаемся получить информацию о канале
+                                    if str(channel.channel_id).startswith('-100'):
+                                        channel_id = int(str(abs(channel.channel_id))[3:])
+                                    else:
+                                        channel_id = abs(channel.channel_id)
+                                        
+                                    try:
+                                        entity = await test_client.get_entity(channel.channel_username or channel_id)
+                                        # Если удалось получить сущность, канал существует
+                                        break
+                                    except Exception as e:
+                                        # Проверяем, является ли ошибка признаком удаленного/недоступного канала
+                                        if "not found" in str(e).lower() or "private" in str(e).lower() or "access" in str(e).lower():
+                                            app_logger.warning(f"Канал {channel.channel_title} недоступен: {e}")
+                                            # Деактивируем канал, если он недоступен
+                                            channel.is_active = False
+                                            await self.session.commit()
+                                            app_logger.info(f"Канал {channel.channel_title} автоматически деактивирован из-за недоступности")
+                                            return
+                                except Exception as e:
+                                    app_logger.debug(f"Ошибка при проверке канала с аккаунтом {account.phone}: {e}")
+                        except Exception as e:
+                            app_logger.debug(f"Ошибка при расшифровке сессии аккаунта {account.phone}: {e}")
+            
+        except Exception as e:
+            app_logger.error(f"Ошибка при проверке доступности канала {channel.channel_title}: {e}")
+            return
+            
         # Получаем доступные реакции канала
         available_reactions, user_reactions = await self.get_channel_reactions(channel.id)
         
