@@ -5,3 +5,4 @@ cryptography
 sqlalchemy
 aiosqlite
 alembic
+greenlet
