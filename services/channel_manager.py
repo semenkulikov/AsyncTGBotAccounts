@@ -7,18 +7,20 @@ from database.models import UserChannel, AccountReaction
 from telethon import TelegramClient
 from telethon.tl.functions.messages import GetHistoryRequest, ImportChatInviteRequest, CheckChatInviteRequest, SendReactionRequest
 from telethon.tl.types import InputPeerChannel, PeerChannel, ReactionEmoji
-from telethon.tl.functions.channels import GetFullChannelRequest, JoinChannelRequest
+from telethon.tl.functions.channels import GetFullChannelRequest, JoinChannelRequest, LeaveChannelRequest
 from telethon.errors import (
     ChannelPrivateError,
     InviteHashEmptyError,
     InviteHashExpiredError,
     InviteHashInvalidError,
     UserAlreadyParticipantError,
+    FloodWaitError,
+    ChannelInvalidError
 )
 from config_data.config import API_ID, API_HASH
 import asyncio
 from loader import app_logger
-from database.query_orm import get_user_by_user_id
+from database.query_orm import get_user_by_user_id, get_user_by_id
 
 # Для решения циклического импорта используем глобальную переменную
 account_service = None
@@ -78,25 +80,74 @@ class ChannelManager:
             return channel
         return None
 
-    async def delete_channel(self, channel_id: int) -> bool:
-        """Удаляет канал"""
+    async def delete_channel(self, channel_id: int, account_service) -> bool:
+        """Удаляет канал и отписывает все аккаунты пользователя от него"""
         try:
             query = select(UserChannel).where(UserChannel.id == channel_id)
             result = await self.session.execute(query)
             channel = result.scalar_one_or_none()
             
             if channel:
+                # Получаем все аккаунты пользователя
+                user = await get_user_by_id(channel.user_id)
+                user_accounts = await account_service.get_user_accounts(user.user_id)
+                
+                # Для каждого аккаунта пытаемся отписаться от канала
+                for account in user_accounts:
+                    try:
+                        # Расшифровываем сессию
+                        session_str = await account_service.decrypt_session(account.session)
+                        
+                        # Создаем клиент через account_service
+                        client = await account_service._create_client(session_str)
+                        
+                        try:
+                            await client.connect()
+                            
+                            # Пытаемся получить информацию о канале
+                            if channel.channel_username:
+                                try:    
+                                    channel_entity = await client.get_entity(channel.channel_username)
+                                except Exception as e:
+                                    app_logger.warning(f"Не удалось получить канал {channel.channel_username} по юзернейму")
+                                    
+                            if channel.channel_id:
+                                try:
+                                    channel_entity = await client.get_entity(PeerChannel(channel.channel_id))
+                                except Exception as e:
+                                    app_logger.warning(f"Не удалось получить канал {channel.channel_id} по ID")
+                                    
+                            
+                            # Отписываемся от канала
+                            await client(LeaveChannelRequest(channel_entity))
+                            app_logger.info(f"Аккаунт {account.phone} успешно отписался от канала {channel.channel_title}")
+                            
+                        except Exception as e:
+                            app_logger.error(f"Ошибка при отписке аккаунта {account.phone} от канала {channel.channel_title}: {str(e)}")
+                        finally:
+                            if client.is_connected():
+                                await client.disconnect()
+                    except Exception as e:
+                        app_logger.error(f"Ошибка при работе с аккаунтом {account.phone}: {str(e)}")
+                        continue
+                
                 # Удаляем все реакции канала
-                await self.session.execute(
+                reactions = await self.session.execute(
                     select(AccountReaction).where(AccountReaction.channel_id == channel_id)
                 )
+                for reaction in reactions.scalars().all():
+                    await self.session.delete(reaction)
+                
                 await self.session.delete(channel)
                 await self.session.commit()
+                app_logger.info(f"Канал {channel.channel_title} успешно удален")
                 return True
+                
             return False
+            
         except Exception as e:
-            await self.session.rollback()
-            raise e
+            app_logger.error(f"Ошибка при удалении канала: {e}")
+            return False
 
     async def update_channel_reaction(self, channel_id: int, user_reactions: list) -> bool:
         """Обновляет пользовательские реакции для канала"""

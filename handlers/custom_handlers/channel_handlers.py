@@ -325,7 +325,7 @@ async def delete_channel_callback(callback: CallbackQuery):
     try:
         async with async_session() as session:
             channel_manager = ChannelManager(session)
-            success = await channel_manager.delete_channel(channel_id)
+            success = await channel_manager.delete_channel(channel_id, service)
             
             if success:
                 await callback.message.edit_text(

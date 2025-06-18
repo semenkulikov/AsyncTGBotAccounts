@@ -9,6 +9,12 @@ async def get_user_by_user_id(user_id: str):
         result = await session.execute(select(User).where(User.user_id == user_id))
         return result.scalars().first()
 
+async def get_user_by_id(user_id: int):
+    """ Функция для получения юзера по его ID """
+    async with async_session() as session:
+        result = await session.execute(select(User).where(User.id == user_id))
+        return result.scalars().first()
+
 async def create_user(user_id: str, username: str, first_name: str, last_name: str, is_admin: bool = False):
     """ Функция для создания объекта User """
     async with async_session() as session:
